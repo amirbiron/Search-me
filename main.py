@@ -6,14 +6,12 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import asyncio
-import aiohttp
-import requests
-from openai import OpenAI
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from openai import OpenAI
 
 # הגדרת לוגינג
 logging.basicConfig(
@@ -25,7 +23,6 @@ logger = logging.getLogger(__name__)
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-BING_API_KEY = os.getenv('BING_API_KEY')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
@@ -64,7 +61,6 @@ class WatchBotDB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 topic TEXT NOT NULL,
-                search_query TEXT,
                 check_interval INTEGER DEFAULT 24,
                 is_active BOOLEAN DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -80,7 +76,8 @@ class WatchBotDB:
                 topic_id INTEGER,
                 title TEXT,
                 url TEXT,
-                snippet TEXT,
+                content_summary TEXT,
+                content_hash TEXT,
                 found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 is_sent BOOLEAN DEFAULT 0,
                 FOREIGN KEY (topic_id) REFERENCES watch_topics (id)
@@ -101,14 +98,14 @@ class WatchBotDB:
         conn.commit()
         conn.close()
     
-    def add_watch_topic(self, user_id: int, topic: str, search_query: str = None) -> int:
+    def add_watch_topic(self, user_id: int, topic: str) -> int:
         """הוספת נושא למעקב"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO watch_topics (user_id, topic, search_query)
-            VALUES (?, ?, ?)
-        ''', (user_id, topic, search_query or topic))
+            INSERT INTO watch_topics (user_id, topic)
+            VALUES (?, ?)
+        ''', (user_id, topic))
         topic_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -177,7 +174,7 @@ class WatchBotDB:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT wt.id, wt.user_id, wt.topic, wt.search_query, wt.last_checked
+            SELECT wt.id, wt.user_id, wt.topic, wt.last_checked
             FROM watch_topics wt
             JOIN users u ON wt.user_id = u.user_id
             WHERE wt.is_active = 1 AND u.is_active = 1
@@ -189,29 +186,31 @@ class WatchBotDB:
                 'id': row[0],
                 'user_id': row[1],
                 'topic': row[2],
-                'search_query': row[3],
-                'last_checked': row[4]
+                'last_checked': row[3]
             })
         
         conn.close()
         return topics
     
-    def save_result(self, topic_id: int, title: str, url: str, snippet: str):
+    def save_result(self, topic_id: int, title: str, url: str, content_summary: str) -> int:
         """שמירת תוצאה שנמצאה"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        # יצירת hash ייחודי לתוכן למניעת כפילויות
+        content_hash = str(hash(f"{title}{url}{content_summary}"))
+        
         # בדיקה אם התוצאה כבר קיימת
         cursor.execute('''
             SELECT id FROM found_results
-            WHERE topic_id = ? AND url = ?
-        ''', (topic_id, url))
+            WHERE topic_id = ? AND (url = ? OR content_hash = ?)
+        ''', (topic_id, url, content_hash))
         
         if not cursor.fetchone():
             cursor.execute('''
-                INSERT INTO found_results (topic_id, title, url, snippet)
-                VALUES (?, ?, ?, ?)
-            ''', (topic_id, title, url, snippet))
+                INSERT INTO found_results (topic_id, title, url, content_summary, content_hash)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (topic_id, title, url, content_summary, content_hash))
             conn.commit()
             result_id = cursor.lastrowid
         else:
@@ -231,138 +230,81 @@ class WatchBotDB:
         conn.commit()
         conn.close()
 
-class BingSearchAPI:
-    """מחלקה לחיפוש ב-Bing"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.endpoint = "https://api.bing.microsoft.com/v7.0/search"
-    
-    async def search(self, query: str, count: int = 10) -> List[Dict]:
-        """ביצוע חיפוש ב-Bing"""
-        headers = {
-            'Ocp-Apim-Subscription-Key': self.api_key,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        params = {
-            'q': query,
-            'count': count,
-            'responseFilter': 'webPages',
-            'textFormat': 'HTML',
-            'safeSearch': 'Moderate'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.endpoint, headers=headers, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        results = []
-                        
-                        if 'webPages' in data and 'value' in data['webPages']:
-                            for item in data['webPages']['value']:
-                                results.append({
-                                    'title': item.get('name', ''),
-                                    'url': item.get('url', ''),
-                                    'snippet': item.get('snippet', ''),
-                                    'datePublished': item.get('datePublished', '')
-                                })
-                        
-                        return results
-                    else:
-                        logger.error(f"Bing API error: {response.status}")
-                        return []
-        
-        except Exception as e:
-            logger.error(f"Error in Bing search: {e}")
-            return []
-
 class SmartWatcher:
-    """מחלקה לניהול המעקב החכם"""
+    """מחלקה לניהול המעקב החכם עם GPT Browsing"""
     
-    def __init__(self, db: WatchBotDB, bing_api: BingSearchAPI):
+    def __init__(self, db: WatchBotDB):
         self.db = db
-        self.bing_api = bing_api
     
-    def generate_smart_query(self, topic: str) -> str:
-        """יצירת שאילתה חכמה עם GPT-4o"""
+    def search_and_analyze_topic(self, topic: str) -> List[Dict]:
+        """חיפוש ואנליזה של נושא עם GPT Browsing"""
         try:
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            
             prompt = f"""
-אתה עוזר חכם ליצירת שאילתות חיפוש מיטביות.
-הנושא למעקב: "{topic}"
+אתה עוזר מעקב חכם. הנושא למעקב: "{topic}"
+התאריך הנוכחי: {current_date}
 
-צור שאילתת חיפוש באנגלית שתמצא חדשות ומידע עדכני על הנושא.
-השאילתה צריכה להיות:
-1. ספציפית ורלוונטית
-2. מכילה מילות מפתח שיביאו תוצאות עדכניות
-3. לא יותר מ-10 מילים
+משימתך:
+1. חפש באינטרנט מידע עדכני וחדש על הנושא הזה (חדשות, מאמרים, פוסטים וכו')
+2. התמקד בתוכן שפורסם בימים האחרונים או השבועות האחרונים
+3. מצא 2-5 מקורות רלוונטיים ואיכותיים
+4. לכל מקור, ספק את המידע הבא:
+   - כותרת ברורה ומתארת
+   - URL מלא ומדויק
+   - סיכום קצר של התוכן (2-3 משפטים)
+   - נימוק למה זה רלוונטי לנושא
 
-השב רק עם השאילתה, ללא הסברים נוספים.
+השב בפורמט JSON הבא:
+[
+  {{
+    "title": "כותרת המאמר/חדשה",
+    "url": "https://example.com/article",
+    "summary": "סיכום קצר של התוכן והרלוונטיות",
+    "relevance_score": 9,
+    "date_found": "2024-01-XX"
+  }}
+]
+
+חפש עכשיו ברשת מידע עדכני על: {topic}
 """
             
             response = openai_client.chat.completions.create(
                 model="gpt-4",
                 messages=[
-                    {"role": "system", "content": "You are a search query optimization expert."},
+                    {
+                        "role": "system", 
+                        "content": "You are a smart web researcher with browsing capabilities. Always search the web for current information and return valid JSON format results."
+                    },
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=50,
-                temperature=0.7
-            )
-            
-            return response.choices[0].message.content.strip()
-        
-        except Exception as e:
-            logger.error(f"Error generating smart query: {e}")
-            return topic
-    
-    def filter_results_with_gpt(self, topic: str, results: List[Dict]) -> List[Dict]:
-        """סינון תוצאות עם GPT-4o"""
-        if not results:
-            return []
-        
-        try:
-            results_text = json.dumps(results, ensure_ascii=False, indent=2)
-            
-            prompt = f"""
-אתה עוזר לסינון תוצאות חיפוש לפי רלוונטיות.
-הנושא למעקב: "{topic}"
-
-תוצאות החיפוש:
-{results_text}
-
-סנן את התוצאות ו:
-1. השאר רק תוצאות רלוונטיות לנושא
-2. הסר תוצאות כפולות או דומות מדי
-3. תעדף תוכן חדש ועדכני
-4. מיין לפי רלוונטיות (הכי רלוונטי ראשון)
-
-השב בפורמט JSON עם מערך של התוצאות הסופיות.
-כל תוצאה צריכה להכיל: title, url, snippet, relevance_score (1-10)
-"""
-            
-            response = openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are a content relevance filter. Always respond with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1500,
+                max_tokens=2000,
                 temperature=0.3
             )
             
-            filtered_results = json.loads(response.choices[0].message.content)
-            return filtered_results if isinstance(filtered_results, list) else []
-        
+            # ניסיון לפרס את ה-JSON
+            response_text = response.choices[0].message.content.strip()
+            
+            # ניקוי הטקסט מסימני markdown אם יש
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+            try:
+                results = json.loads(response_text)
+                return results if isinstance(results, list) else []
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON response: {response_text}")
+                return []
+            
         except Exception as e:
-            logger.error(f"Error filtering results with GPT: {e}")
-            return results[:3]  # החזרת 3 התוצאות הראשונות במקרה של שגיאה
+            logger.error(f"Error in GPT browsing search: {e}")
+            return []
 
 # יצירת אובייקטי המערכת
 db = WatchBotDB(DB_PATH)
-bing_api = BingSearchAPI(BING_API_KEY)
-smart_watcher = SmartWatcher(db, bing_api)
+smart_watcher = SmartWatcher(db)
 
 # שרת Flask ל-Keep-Alive
 app = Flask(__name__)
@@ -390,6 +332,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 אני עוזר לכם לעקוב אחרי נושאים שמעניינים אתכם ומתריע כשיש מידע חדש.
 
+🧠 אני משתמש ב-GPT-4o עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
+
 פקודות זמינות:
 📌 /watch <נושא> - הוספת נושא למעקב
 📋 /list - רשימת הנושאים שלכם
@@ -398,7 +342,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ▶️ /resume - הפעלת ההתראות
 ❓ /help - עזרה מפורטת
 
-דוגמה: /watch בינה מלאכותית
+דוגמה: /watch בינה מלאכותית 2024
 """
     
     await update.message.reply_text(welcome_message)
@@ -406,23 +350,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הוספת נושא למעקב"""
     if not context.args:
-        await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch בינה מלאכותית")
+        await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch בינה מלאכותית 2024")
         return
     
     topic = ' '.join(context.args)
     user_id = update.effective_user.id
     
-    # יצירת שאילתה חכמה
-    smart_query = smart_watcher.generate_smart_query(topic)
-    
     # הוספה למסד הנתונים
-    topic_id = db.add_watch_topic(user_id, topic, smart_query)
+    topic_id = db.add_watch_topic(user_id, topic)
     
     await update.message.reply_text(
         f"✅ הנושא נוסף בהצלחה!\n"
         f"📝 נושא: {topic}\n"
-        f"🔍 שאילתת חיפוש: {smart_query}\n"
-        f"🆔 מזהה: {topic_id}\n\n"
+        f"🆔 מזהה: {topic_id}\n"
+        f"🧠 אני אשתמש ב-GPT עם browsing לחיפוש מידע עדכני\n\n"
         f"אבדוק אותו כל 24 שעות ואתריע על תוכן חדש."
     )
 
@@ -440,9 +381,15 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, topic in enumerate(topics, 1):
         status = "🟢" if topic['is_active'] else "🔴"
         last_check = topic['last_checked'] or "מעולם לא"
+        if last_check != "מעולם לא":
+            # קיצור התאריך להצגה נוחה יותר
+            try:
+                last_check = datetime.fromisoformat(last_check).strftime("%d/%m %H:%M")
+            except:
+                pass
         
         message += f"{i}. {status} {topic['topic']}\n"
-        message += f"   🆔 {topic['id']} | 🕐 נבדק לאחרונה: {last_check}\n\n"
+        message += f"   🆔 {topic['id']} | 🕐 נבדק: {last_check}\n\n"
     
     # הוספת כפתורי פעולה
     keyboard = [
@@ -488,7 +435,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📌 **הוספת נושא למעקב:**
 /watch <נושא>
-דוגמה: /watch טכנולוגיות חדשות
+דוגמה: /watch טכנולוגיות AI חדשות
 
 📋 **צפייה ברשימת הנושאים:**
 /list
@@ -505,14 +452,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם כל 24 שעות
-• משתמש בבינה מלאכותית ליצירת שאילתות חיפוש מיטביות
-• מסנן תוצאות ושולח רק תוכן חדש ורלוונטי
+• משתמש ב-GPT-4o עם browsing לחיפוש באינטרנט
+• מוצא מידע עדכני ורלוונטי בלבד
 • שומר היסטוריה כדי למנוע כפילויות
+• שולח לכם רק תוכן חדש שלא ראיתם
 
 💡 **טיפים:**
 • השתמשו בנושאים ספציפיים לתוצאות טובות יותר
+• הוסיפו שנה או מילות מפתח נוספות (למשל: "AI 2024")
 • ניתן לעקוב אחרי מספר נושאים במקביל
 • הבוט זוכר מה כבר נשלח אליכם
+
+🧠 **טכנולוגיה:**
+הבוט משתמש ב-GPT-4o עם יכולות browsing מתקדמות לחיפוש והערכה של מידע ברשת.
 """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -541,6 +493,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT COUNT(*) FROM found_results")
     total_results = cursor.fetchone()[0]
     
+    cursor.execute("SELECT COUNT(*) FROM found_results WHERE found_at > datetime('now', '-24 hours')")
+    results_today = cursor.fetchone()[0]
+    
     conn.close()
     
     stats_message = f"""
@@ -549,9 +504,41 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👥 משתמשים: {active_users}/{total_users} (פעילים/סה"כ)
 📌 נושאים פעילים: {active_topics}
 🔍 תוצאות שנמצאו: {total_results}
+📈 תוצאות היום: {results_today}
+
+🧠 משתמש ב-GPT-4o עם browsing
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
+
+async def test_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת בדיקה מהירה (אדמין בלבד)"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ /test_search <נושא לבדיקה>")
+        return
+    
+    topic = ' '.join(context.args)
+    await update.message.reply_text(f"🔍 בודק נושא: {topic}\nרגע...")
+    
+    try:
+        results = smart_watcher.search_and_analyze_topic(topic)
+        
+        if results:
+            message = f"✅ נמצאו {len(results)} תוצאות עבור '{topic}':\n\n"
+            for i, result in enumerate(results[:3], 1):
+                message += f"{i}. **{result.get('title', 'ללא כותרת')}**\n"
+                message += f"🔗 {result.get('url', 'ללא קישור')}\n"
+                message += f"📝 {result.get('summary', 'ללא סיכום')}\n\n"
+        else:
+            message = f"❌ לא נמצאו תוצאות עבור '{topic}'"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ שגיאה בבדיקה: {str(e)}")
 
 # פונקציית המעקב האוטומטית
 async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
@@ -559,35 +546,43 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Starting automatic topics check...")
     
     topics = db.get_active_topics_for_check()
+    logger.info(f"Found {len(topics)} topics to check")
     
     for topic in topics:
         try:
-            # חיפוש תוצאות
-            results = await bing_api.search(topic['search_query'])
+            logger.info(f"Checking topic: {topic['topic']} (ID: {topic['id']})")
+            
+            # חיפוש תוצאות עם GPT Browsing
+            results = smart_watcher.search_and_analyze_topic(topic['topic'])
             
             if results:
-                # סינון תוצאות עם GPT
-                filtered_results = smart_watcher.filter_results_with_gpt(topic['topic'], results)
+                logger.info(f"Found {len(results)} results for topic {topic['id']}")
                 
                 # שמירת תוצאות חדשות ושליחה
-                for result in filtered_results[:3]:  # מקסימום 3 תוצאות
+                new_results_count = 0
+                
+                for result in results[:3]:  # מקסימום 3 תוצאות
                     result_id = db.save_result(
                         topic['id'],
-                        result['title'],
-                        result['url'],
-                        result['snippet']
+                        result.get('title', 'ללא כותרת'),
+                        result.get('url', ''),
+                        result.get('summary', 'ללא סיכום')
                     )
                     
                     if result_id:  # תוצאה חדשה
+                        new_results_count += 1
+                        
                         # שליחת התראה למשתמש
                         message = f"""
 🔔 **עדכון חדש עבור: {topic['topic']}**
 
-📰 {result['title']}
+📰 {result.get('title', 'ללא כותרת')}
 
-📝 {result['snippet']}
+📝 {result.get('summary', 'ללא סיכום')}
 
-🔗 [קישור לכתבה]({result['url']})
+🔗 [קישור למקור]({result.get('url', '')})
+
+🎯 רלוונטיות: {result.get('relevance_score', 'N/A')}/10
 """
                         
                         try:
@@ -597,11 +592,22 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode='Markdown',
                                 disable_web_page_preview=False
                             )
+                            logger.info(f"Sent notification to user {topic['user_id']} for topic {topic['id']}")
                         except Exception as e:
                             logger.error(f"Failed to send message to user {topic['user_id']}: {e}")
+                
+                if new_results_count > 0:
+                    logger.info(f"Sent {new_results_count} new results for topic {topic['id']}")
+                else:
+                    logger.info(f"No new results for topic {topic['id']} (all were duplicates)")
+            else:
+                logger.info(f"No results found for topic {topic['id']}")
             
             # עדכון זמן הבדיקה
             db.update_topic_checked(topic['id'])
+            
+            # המתנה קצרה בין נושאים למניעת עומס על ה-API
+            await asyncio.sleep(2)
             
         except Exception as e:
             logger.error(f"Error checking topic {topic['id']}: {e}")
@@ -639,10 +645,10 @@ def main():
     application.add_handler(CommandHandler("resume", resume_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("test_search", test_search_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     
     # הוספת מתזמן למשימות אוטומטיות
-    scheduler = AsyncIOScheduler()
     job_queue = application.job_queue
     
     # הפעלת בדיקה אוטומטית כל 24 שעות
