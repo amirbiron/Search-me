@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: watch-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    branch: main
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: BING_API_KEY
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DB_PATH
+        value: /var/data/watchbot.db
+    disk:
+      name: watchbot-data
+      mountPath: /var/data
+      sizeGB: 1
