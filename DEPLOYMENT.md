@@ -4,8 +4,7 @@
 
 ### ✅ הכנת המפתחות
 - [ ] יצירת בוט טלגרם ב-@BotFather
-- [ ] קבלת OpenAI API Key (עם אשראי)
-- [ ] יצירת Bing Search API ב-Azure
+- [ ] קבלת OpenAI API Key (עם אשראי ותמיכה ב-browsing)
 - [ ] קבלת Telegram User ID שלכם (שלחו /start ל-@userinfobot)
 
 ### ✅ הכנת הקוד
@@ -32,7 +31,6 @@ pip install -r requirements.txt
 # הגדרת משתני סביבה
 export BOT_TOKEN="your_bot_token"
 export OPENAI_API_KEY="your_openai_key"
-export BING_API_KEY="your_bing_key"
 export ADMIN_ID="your_telegram_id"
 export DB_PATH="./test.db"
 export PORT="5000"
@@ -63,8 +61,7 @@ Runtime: Docker
 | Key | Value |
 |-----|-------|
 | `BOT_TOKEN` | Token מ-@BotFather |
-| `OPENAI_API_KEY` | Key מ-OpenAI |
-| `BING_API_KEY` | Key מ-Azure |
+| `OPENAI_API_KEY` | Key מ-OpenAI (עם browsing) |
 | `ADMIN_ID` | ה-User ID שלכם |
 
 ### שלב 4: אחסון קבוע
