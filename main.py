@@ -362,8 +362,10 @@ class SmartWatcher:
     def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict]:
         """חיפוש ואנליזה של נושא עם GPT Browsing"""
         # בדיקת מגבלת שימוש אם סופק user_id
-        if user_id and not self.db.increment_usage(user_id):
-            return []  # חריגה ממגבלת השימוש
+        if user_id:
+            usage_info = self.db.get_user_usage(user_id)
+            if usage_info['remaining'] <= 0:
+                return []  # חריגה ממגבלת השימוש
         
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
@@ -408,6 +410,10 @@ class SmartWatcher:
                 max_tokens=2000,
                 temperature=0.3
             )
+            
+            # עדכון המונה רק לאחר שאילתת GPT מוצלחת
+            if user_id:
+                self.db.increment_usage(user_id)
             
             # ניסיון לפרס את ה-JSON
             response_text = response.choices[0].message.content
@@ -554,7 +560,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הוספת נושא למעקב"""
     if not context.args:
-        await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch בינה מלאכותית 2024")
+        await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch Galaxy Tab S11 Ultra")
         return
     
     topic = ' '.join(context.args)
@@ -628,7 +634,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הסרת נושא"""
     if not context.args:
-        await update.message.reply_text("❌ אנא ציינו נושא או מזהה להסרה.\nדוגמה: /remove 1 או /remove בינה מלאכותית")
+        await update.message.reply_text("❌ אנא ציינו נושא או מזהה להסרה.\nדוגמה: /remove 1 או /remove Galaxy Tab S11 Ultra")
         return
     
     identifier = ' '.join(context.args)
@@ -832,9 +838,6 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             # עדכון זמן הבדיקה האחרונה
             db.update_topic_checked(topic_id)
             
-            # עדכון סטטיסטיקת השימוש
-            db.increment_usage(user_id)
-            
             # שמירת התוצאות - עם בדיקת תקינות השדות
             valid_results = []
             for result in results:
@@ -898,9 +901,6 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             # עדכון זמן הבדיקה האחרונה גם אם לא נמצאו תוצאות
             db.update_topic_checked(topic_id)
-            
-            # עדכון סטטיסטיקת השימוש
-            db.increment_usage(user_id)
             
             # שליחת הודעה שלא נמצאו תוצאות
             await context.bot.send_message(
@@ -1064,7 +1064,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # הוספת נושא חדש
             user_states[user_id] = {"state": "waiting_for_topic"}
             await query.edit_message_text(
-                "📝 אנא שלחו את הנושא שתרצו לעקוב אחריו:\n\nדוגמה: בינה מלאכותית 2024",
+                "📝 אנא שלחו את הנושא שתרצו לעקוב אחריו:\n\nדוגמה: Galaxy Tab S11 Ultra",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ביטול", callback_data="main_menu")]])
             )
             
