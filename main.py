@@ -253,30 +253,43 @@ class WatchBotDB:
     
     def save_result(self, topic_id: int, title: str, url: str, content_summary: str) -> int:
         """שמירת תוצאה שנמצאה"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # יצירת hash ייחודי לתוכן למניעת כפילויות
-        content_hash = str(hash(f"{title}{url}{content_summary}"))
-        
-        # בדיקה אם התוצאה כבר קיימת
-        cursor.execute('''
-            SELECT id FROM found_results
-            WHERE topic_id = ? AND (url = ? OR content_hash = ?)
-        ''', (topic_id, url, content_hash))
-        
-        if not cursor.fetchone():
+        try:
+            # וידוא שהפרמטרים תקינים
+            if not title:
+                title = 'ללא כותרת'
+            if not url:
+                url = ''
+            if not content_summary:
+                content_summary = 'ללא סיכום'
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # יצירת hash ייחודי לתוכן למניעת כפילויות
+            content_hash = str(hash(f"{title}{url}{content_summary}"))
+            
+            # בדיקה אם התוצאה כבר קיימת
             cursor.execute('''
-                INSERT INTO found_results (topic_id, title, url, content_summary, content_hash)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (topic_id, title, url, content_summary, content_hash))
-            conn.commit()
-            result_id = cursor.lastrowid
-        else:
-            result_id = None
-        
-        conn.close()
-        return result_id
+                SELECT id FROM found_results
+                WHERE topic_id = ? AND (url = ? OR content_hash = ?)
+            ''', (topic_id, url, content_hash))
+            
+            if not cursor.fetchone():
+                cursor.execute('''
+                    INSERT INTO found_results (topic_id, title, url, content_summary, content_hash)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (topic_id, title, url, content_summary, content_hash))
+                conn.commit()
+                result_id = cursor.lastrowid
+            else:
+                result_id = None
+            
+            conn.close()
+            return result_id
+            
+        except Exception as e:
+            logger.error(f"Error saving result for topic {topic_id}: {e}")
+            return None
     
     def update_topic_checked(self, topic_id: int):
         """עדכון זמן הבדיקה האחרון"""
@@ -397,23 +410,78 @@ class SmartWatcher:
             )
             
             # ניסיון לפרס את ה-JSON
-            response_text = response.choices[0].message.content.strip()
+            response_text = response.choices[0].message.content
+            if not response_text:
+                logger.warning(f"Empty response from GPT for topic '{topic}'")
+                return []
+            
+            response_text = response_text.strip()
             
             # ניקוי הטקסט מסימני markdown אם יש
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            if "```json" in response_text.lower():
+                parts = response_text.lower().split("```json")
+                if len(parts) > 1:
+                    end_parts = parts[1].split("```")
+                    if len(end_parts) > 0:
+                        # מצא את המיקום המקורי בטקסט
+                        start_idx = response_text.lower().find("```json") + 7
+                        end_idx = response_text.find("```", start_idx)
+                        if end_idx > start_idx:
+                            response_text = response_text[start_idx:end_idx].strip()
             elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+                parts = response_text.split("```")
+                if len(parts) >= 3:
+                    response_text = parts[1].strip()
+            
+            # הסרת תוכן שאינו JSON
+            if response_text.startswith('[') or response_text.startswith('{'):
+                # מצא את סוף ה-JSON
+                bracket_count = 0
+                json_end = 0
+                start_char = response_text[0]
+                end_char = ']' if start_char == '[' else '}'
+                
+                for i, char in enumerate(response_text):
+                    if char == start_char:
+                        bracket_count += 1
+                    elif char == end_char:
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            json_end = i + 1
+                            break
+                
+                if json_end > 0:
+                    response_text = response_text[:json_end]
             
             try:
                 results = json.loads(response_text)
-                return results if isinstance(results, list) else []
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse JSON response: {response_text}")
+                if isinstance(results, list):
+                    # וידוא שכל התוצאות מכילות את השדות הנדרשים
+                    valid_results = []
+                    for result in results:
+                        if isinstance(result, dict):
+                            # וידוא שקיימים השדות הבסיסיים
+                            if 'title' not in result:
+                                result['title'] = 'ללא כותרת'
+                            if 'url' not in result:
+                                result['url'] = ''
+                            if 'summary' not in result:
+                                result['summary'] = 'ללא סיכום'
+                            valid_results.append(result)
+                        else:
+                            logger.warning(f"Skipping non-dict result: {result}")
+                    return valid_results
+                else:
+                    logger.warning(f"GPT returned non-list result: {results}")
+                    return []
+            except json.JSONDecodeError as json_error:
+                logger.error(f"Failed to parse JSON response for topic '{topic}'. Error: {json_error}")
+                logger.debug(f"Raw response text: {response_text[:500]}...")  # רק 500 תווים ראשונים
                 return []
             
         except Exception as e:
-            logger.error(f"Error in GPT browsing search: {e}")
+            logger.error(f"Error in GPT browsing search for topic '{topic}': {e}")
+            # במקרה של שגיאה, נחזיר רשימה ריקה כדי שהבוט ימשיך לפעול
             return []
 
 # יצירת אובייקטי המערכת
@@ -767,33 +835,64 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             # עדכון סטטיסטיקת השימוש
             db.increment_usage(user_id)
             
-            # שמירת התוצאות
+            # שמירת התוצאות - עם בדיקת תקינות השדות
+            valid_results = []
             for result in results:
-                db.save_result(topic_id, result['title'], result['url'], result['summary'])
+                if isinstance(result, dict) and all(key in result for key in ['title', 'url', 'summary']):
+                    try:
+                        db.save_result(topic_id, result['title'], result['url'], result['summary'])
+                        valid_results.append(result)
+                    except Exception as save_error:
+                        logger.warning(f"Failed to save result for topic {topic_id}: {save_error}")
+                        continue
+                else:
+                    logger.warning(f"Skipping invalid result for topic {topic_id}: missing required fields. Result: {result}")
+                    continue
             
-            # שליחת התוצאות למשתמש
-            message = f"🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
+            # שליחת התוצאות למשתמש - רק תוצאות תקינות
+            if valid_results:
+                message = f"🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
+                
+                for i, result in enumerate(valid_results[:5], 1):  # מגבלה של 5 תוצאות
+                    title = result.get('title', 'ללא כותרת')
+                    url = result.get('url', 'ללא קישור')
+                    summary = result.get('summary', 'ללא סיכום')
+                    
+                    message += f"**{i}. {title}**\n"
+                    message += f"🔗 {url}\n"
+                    message += f"📄 {summary}\n\n"
             
-            for i, result in enumerate(results[:5], 1):  # מגבלה של 5 תוצאות
-                message += f"**{i}. {result['title']}**\n"
-                message += f"🔗 {result['url']}\n"
-                message += f"📄 {result['summary']}\n\n"
-            
-            if len(results) > 5:
-                message += f"📋 ועוד {len(results) - 5} תוצאות נוספות...\n\n"
-            
-            message += f"⏰ נבדק עכשיו (בדיקה חד-פעמית)\n"
-            message += f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה"
-            
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=message,
-                parse_mode='Markdown',
-                disable_web_page_preview=True,
-                reply_markup=get_main_menu_keyboard()
-            )
-            
-            logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(results)} results")
+                if len(valid_results) > 5:
+                    message += f"📋 ועוד {len(valid_results) - 5} תוצאות נוספות...\n\n"
+                
+                message += f"⏰ נבדק עכשיו (בדיקה חד-פעמית)\n"
+                message += f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה"
+                
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True,
+                    reply_markup=get_main_menu_keyboard()
+                )
+                
+                logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(valid_results)} valid results out of {len(results)} total results")
+            else:
+                # אם לא היו תוצאות תקינות, נתייחס לזה כמו שלא נמצאו תוצאות
+                logger.info(f"One-time check completed for topic {topic_id}, no valid results found (had {len(results)} invalid results)")
+                
+                # עדכון זמן הבדיקה האחרונה גם אם לא נמצאו תוצאות תקינות
+                db.update_topic_checked(topic_id)
+                
+                # שליחת הודעה שלא נמצאו תוצאות תקינות
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                         f"📭 לא נמצאו תוצאות תקינות כרגע\n"
+                         f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
+                    parse_mode='Markdown',
+                    reply_markup=get_main_menu_keyboard()
+                )
         else:
             logger.info(f"One-time check completed for topic {topic_id}, no new results found")
             
@@ -816,10 +915,19 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in one-time topic check for topic {topic_id}: {e}")
         
+        # עדכון זמן הבדיקה גם במקרה של שגיאה כדי למנוע לולאת שגיאות
         try:
+            db.update_topic_checked(topic_id)
+        except Exception as db_error:
+            logger.error(f"Failed to update topic check time after error for topic {topic_id}: {db_error}")
+        
+        try:
+            # נסה לקבל את שם הנושא בצורה בטוחה
+            topic_name = topic.get('topic', 'נושא לא זמין') if topic else 'נושא לא זמין'
+            
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"❌ אירעה שגיאה בבדיקה החד-פעמית של הנושא: {topic['topic']}\n"
+                text=f"❌ אירעה שגיאה בבדיקה החד-פעמית של הנושא: {topic_name}\n"
                      f"הבדיקות הקבועות יפעלו כרגיל.",
                 reply_markup=get_main_menu_keyboard()
             )
@@ -915,7 +1023,13 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(2)
             
         except Exception as e:
-            logger.error(f"Error checking topic {topic['id']}: {e}")
+            logger.error(f"Error checking topic {topic['id']} ('{topic.get('topic', 'unknown')}'): {e}")
+            
+            # עדכון זמן הבדיקה גם במקרה של שגיאה כדי למנוע לולאת שגיאות
+            try:
+                db.update_topic_checked(topic['id'])
+            except Exception as db_error:
+                logger.error(f"Failed to update topic check time after error for topic {topic['id']}: {db_error}")
     
     logger.info(f"Finished checking {len(topics)} topics")
 
