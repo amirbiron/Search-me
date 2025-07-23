@@ -226,6 +226,31 @@ class WatchBotDB:
         conn.close()
         return topics
     
+    def get_topic_by_id(self, topic_id: int) -> Dict:
+        """קבלת פרטי נושא לפי מזהה"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, user_id, topic, check_interval, is_active, created_at, last_checked
+            FROM watch_topics
+            WHERE id = ?
+        ''', (topic_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'id': row[0],
+                'user_id': row[1],
+                'topic': row[2],
+                'check_interval': row[3],
+                'is_active': row[4],
+                'created_at': row[5],
+                'last_checked': row[6]
+            }
+        return None
+    
     def save_result(self, topic_id: int, title: str, url: str, content_summary: str) -> int:
         """שמירת תוצאה שנמצאה"""
         conn = sqlite3.connect(self.db_path)
@@ -470,10 +495,19 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # הוספה למסד הנתונים
     topic_id = db.add_watch_topic(user_id, topic)
     
+    # תזמון בדיקה חד-פעמית דקה לאחר הוספת הנושא
+    context.application.job_queue.run_once(
+        check_single_topic_job,
+        when=timedelta(minutes=1),
+        data={'topic_id': topic_id, 'user_id': user_id},
+        name=f"one_time_check_{topic_id}"
+    )
+    
     await update.message.reply_text(
         f"✅ הנושא נוסף בהצלחה!\n"
         f"📝 נושא: {topic}\n"
         f"🆔 מזהה: {topic_id}\n"
+        f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n"
         f"🧠 אני אשתמש ב-GPT עם browsing לחיפוש מידע עדכני\n\n"
         f"אבדוק אותו כל 24 שעות ואתריע על תוכן חדש."
     )
@@ -686,6 +720,111 @@ async def test_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ שגיאה בבדיקה: {str(e)}")
 
+# פונקציית בדיקה חד-פעמית לנושא חדש
+async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
+    """בדיקה חד-פעמית של נושא חדש שנוסף"""
+    job_data = context.job.data
+    topic_id = job_data['topic_id']
+    user_id = job_data['user_id']
+    
+    logger.info(f"Starting one-time check for topic ID: {topic_id}")
+    
+    # קבלת פרטי הנושא
+    topic = db.get_topic_by_id(topic_id)
+    if not topic:
+        logger.error(f"Topic {topic_id} not found for one-time check")
+        return
+    
+    try:
+        logger.info(f"One-time checking topic: {topic['topic']} (ID: {topic_id})")
+        
+        # בדיקת מגבלת שימוש לפני הבדיקה
+        usage_info = db.get_user_usage(user_id)
+        if usage_info['remaining'] <= 0:
+            logger.info(f"User {user_id} has reached monthly limit, skipping one-time check for topic {topic_id}")
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"📊 הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\n"
+                         f"הבדיקה החד-פעמית לנושא החדש לא בוצעה.\n\n"
+                         f"🔍 להצגת פרטי השימוש: /start ← 📊 שימוש נוכחי",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except Exception as e:
+                logger.error(f"Failed to send limit notification to user {user_id}: {e}")
+            
+            return
+        
+        # חיפוש תוצאות עם GPT Browsing
+        results = smart_watcher.search_and_analyze_topic(topic['topic'], user_id)
+        
+        if results:
+            # עדכון זמן הבדיקה האחרונה
+            db.update_topic_checked(topic_id)
+            
+            # עדכון סטטיסטיקת השימוש
+            db.increment_usage(user_id)
+            
+            # שמירת התוצאות
+            for result in results:
+                db.save_result(topic_id, result['title'], result['url'], result['summary'])
+            
+            # שליחת התוצאות למשתמש
+            message = f"🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
+            
+            for i, result in enumerate(results[:5], 1):  # מגבלה של 5 תוצאות
+                message += f"**{i}. {result['title']}**\n"
+                message += f"🔗 {result['url']}\n"
+                message += f"📄 {result['summary']}\n\n"
+            
+            if len(results) > 5:
+                message += f"📋 ועוד {len(results) - 5} תוצאות נוספות...\n\n"
+            
+            message += f"⏰ נבדק עכשיו (בדיקה חד-פעמית)\n"
+            message += f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה"
+            
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message,
+                parse_mode='Markdown',
+                disable_web_page_preview=True,
+                reply_markup=get_main_menu_keyboard()
+            )
+            
+            logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(results)} results")
+        else:
+            logger.info(f"One-time check completed for topic {topic_id}, no new results found")
+            
+            # עדכון זמן הבדיקה האחרונה גם אם לא נמצאו תוצאות
+            db.update_topic_checked(topic_id)
+            
+            # עדכון סטטיסטיקת השימוש
+            db.increment_usage(user_id)
+            
+            # שליחת הודעה שלא נמצאו תוצאות
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                     f"📭 לא נמצאו תוצאות חדשות כרגע\n"
+                     f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu_keyboard()
+            )
+        
+    except Exception as e:
+        logger.error(f"Error in one-time topic check for topic {topic_id}: {e}")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ אירעה שגיאה בבדיקה החד-פעמית של הנושא: {topic['topic']}\n"
+                     f"הבדיקות הקבועות יפעלו כרגיל.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except Exception as send_error:
+            logger.error(f"Failed to send error notification to user {user_id}: {send_error}")
+
 # פונקציית המעקב האוטומטית
 async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
     """בדיקת נושאים אוטומטית"""
@@ -859,6 +998,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 topic_id = db.add_watch_topic(user_id, topic, frequency)
                 
+                # תזמון בדיקה חד-פעמית דקה לאחר הוספת הנושא
+                context.application.job_queue.run_once(
+                    check_single_topic_job,
+                    when=timedelta(minutes=1),
+                    data={'topic_id': topic_id, 'user_id': user_id},
+                    name=f"one_time_check_{topic_id}"
+                )
+                
                 freq_text = {
                     6: "כל 6 שעות",
                     12: "כל 12 שעות", 
@@ -871,7 +1018,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ הנושא נוסף בהצלחה!\n\n"
                     f"📝 נושא: {topic}\n"
                     f"🆔 מזהה: {topic_id}\n"
-                    f"⏰ תדירות בדיקה: {freq_text}\n\n"
+                    f"⏰ תדירות בדיקה: {freq_text}\n"
+                    f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n\n"
                     f"🧠 אני אשתמש ב-GPT עם browsing לחיפוש מידע עדכני",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
                 )
