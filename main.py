@@ -784,13 +784,13 @@ async def test_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         results = smart_watcher.search_and_analyze_topic(topic)
         
         if results:
-            message = f"✅ נמצאו {len(results)} תוצאות עבור '{topic}':\n\n"
+            message = f"👇 הנה הכלים שמצאתי:\n\n✅ נמצאו {len(results)} תוצאות עבור '{topic}':\n\n"
             for i, result in enumerate(results[:3], 1):
                 message += f"{i}. **{result.get('title', 'ללא כותרת')}**\n"
                 message += f"🔗 {result.get('url', 'ללא קישור')}\n"
                 message += f"📝 {result.get('summary', 'ללא סיכום')}\n\n"
         else:
-            message = f"❌ לא נמצאו תוצאות עבור '{topic}'"
+            message = f"👇 הנה הכלים שמצאתי:\n\n❌ לא נמצאו תוצאות עבור '{topic}'"
         
         await update.message.reply_text(message, parse_mode='Markdown')
         
@@ -856,7 +856,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             # שליחת התוצאות למשתמש - רק תוצאות תקינות
             if valid_results:
-                message = f"🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
+                message = f"👇 הנה הכלים שמצאתי:\n\n🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
                 
                 for i, result in enumerate(valid_results[:5], 1):  # מגבלה של 5 תוצאות
                     title = result.get('title', 'ללא כותרת')
@@ -892,7 +892,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                 # שליחת הודעה שלא נמצאו תוצאות תקינות
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                    text=f"👇 הנה הכלים שמצאתי:\n\n🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
                          f"📭 לא נמצאו תוצאות תקינות כרגע\n"
                          f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                     parse_mode='Markdown',
@@ -907,7 +907,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             # שליחת הודעה שלא נמצאו תוצאות
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                text=f"👇 הנה הכלים שמצאתי:\n\n🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
                      f"📭 לא נמצאו תוצאות חדשות כרגע\n"
                      f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                 parse_mode='Markdown',
