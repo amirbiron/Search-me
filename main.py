@@ -407,8 +407,6 @@ class SmartWatcher:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                tools=[{"type":"browser"}],
-                tool_choice="auto",
                 max_tokens=2000,
                 temperature=0.3
             )
