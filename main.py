@@ -399,7 +399,7 @@ class SmartWatcher:
 """
             
             response = openai_client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-4o",
                 messages=[
                     {
                         "role": "system", 
@@ -407,9 +407,13 @@ class SmartWatcher:
                     },
                     {"role": "user", "content": prompt}
                 ],
+                tools=[{"type":"browser"}],
+                tool_choice="auto",
                 max_tokens=2000,
                 temperature=0.3
             )
+            
+            logger.info(f"🔍 GPT raw response for topic '{topic}': {response}")
             
             # עדכון המונה רק לאחר שאילתת GPT מוצלחת
             if user_id:
