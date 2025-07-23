@@ -523,6 +523,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     message = "📋 הנושאים שלכם במעקב:\n\n"
+    keyboard = []
     
     for i, topic in enumerate(topics, 1):
         status = "🟢"  # כל הנושאים פעילים (אחרת הם לא מוצגים)
@@ -546,12 +547,12 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"{i}. {status} {topic['topic']}\n"
         message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
         message += f"   🕐 נבדק: {last_check}\n\n"
+        
+        # הוספת כפתור מחיקה לכל נושא
+        keyboard.append([InlineKeyboardButton(f"🗑️ מחק '{topic['topic'][:20]}{'...' if len(topic['topic']) > 20 else ''}'", callback_data=f"delete_topic_{topic['id']}")])
     
-    # הוספת כפתורי פעולה
-    keyboard = [
-        [InlineKeyboardButton("🔄 רענון רשימה", callback_data="list_topics")],
-        [InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]
-    ]
+    # הוספת כפתור חזרה לתפריט
+    keyboard.append([InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(message, reply_markup=reply_markup)
@@ -1026,6 +1027,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # ניקוי מצב המשתמש
                 del user_states[user_id]
+        
+        elif data.startswith("delete_topic_"):
+            # מחיקת נושא
+            topic_id = data.split("_")[2]
+            success = db.remove_topic(user_id, topic_id)
+            
+            if success:
+                await query.edit_message_text(
+                    f"✅ הנושא נמחק בהצלחה!",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ שגיאה במחיקת הנושא. אנא נסו שוב.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                )
             
     except Exception as e:
         logger.error(f"Error in button callback: {e}")
@@ -1044,6 +1061,7 @@ async def show_topics_list(query, user_id):
         return
     
     message = "📋 הנושאים שלכם במעקב:\n\n"
+    keyboard = []
     
     for i, topic in enumerate(topics, 1):
         status = "🟢"
@@ -1065,11 +1083,12 @@ async def show_topics_list(query, user_id):
         message += f"{i}. {status} {topic['topic']}\n"
         message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
         message += f"   🕐 נבדק: {last_check}\n\n"
+        
+        # הוספת כפתור מחיקה לכל נושא
+        keyboard.append([InlineKeyboardButton(f"🗑️ מחק '{topic['topic'][:20]}{'...' if len(topic['topic']) > 20 else ''}'", callback_data=f"delete_topic_{topic['id']}")])
     
-    keyboard = [
-        [InlineKeyboardButton("🔄 רענון רשימה", callback_data="list_topics")],
-        [InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]
-    ]
+    # הוספת כפתור חזרה לתפריט
+    keyboard.append([InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(message, reply_markup=reply_markup)
