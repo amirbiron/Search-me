@@ -8,7 +8,7 @@ from typing import List, Dict, Any
 import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from openai import OpenAI
@@ -26,6 +26,9 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
+
+# קבועים
+MONTHLY_LIMIT = 100  # מגבלת שאילתות חודשית
 
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -84,6 +87,17 @@ class WatchBotDB:
             )
         ''')
         
+        # טבלת סטטיסטיקת שימוש
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usage_stats (
+                user_id INTEGER,
+                month TEXT,
+                usage_count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, month),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -98,14 +112,14 @@ class WatchBotDB:
         conn.commit()
         conn.close()
     
-    def add_watch_topic(self, user_id: int, topic: str) -> int:
+    def add_watch_topic(self, user_id: int, topic: str, check_interval: int = 24) -> int:
         """הוספת נושא למעקב"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO watch_topics (user_id, topic)
-            VALUES (?, ?)
-        ''', (user_id, topic))
+            INSERT INTO watch_topics (user_id, topic, check_interval)
+            VALUES (?, ?, ?)
+        ''', (user_id, topic, check_interval))
         topic_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -116,7 +130,7 @@ class WatchBotDB:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, topic, is_active, created_at, last_checked
+            SELECT id, topic, check_interval, is_active, created_at, last_checked
             FROM watch_topics
             WHERE user_id = ? AND is_active = 1
             ORDER BY created_at DESC
@@ -127,9 +141,10 @@ class WatchBotDB:
             topics.append({
                 'id': row[0],
                 'topic': row[1],
-                'is_active': row[2],
-                'created_at': row[3],
-                'last_checked': row[4]
+                'check_interval': row[2],
+                'is_active': row[3],
+                'created_at': row[4],
+                'last_checked': row[5]
             })
         
         conn.close()
@@ -170,11 +185,14 @@ class WatchBotDB:
         conn.close()
     
     def get_active_topics_for_check(self) -> List[Dict]:
-        """קבלת נושאים פעילים לבדיקה"""
+        """קבלת נושאים פעילים לבדיקה לפי תדירות"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        
+        current_time = datetime.now()
+        
         cursor.execute('''
-            SELECT wt.id, wt.user_id, wt.topic, wt.last_checked
+            SELECT wt.id, wt.user_id, wt.topic, wt.last_checked, wt.check_interval
             FROM watch_topics wt
             JOIN users u ON wt.user_id = u.user_id
             WHERE wt.is_active = 1 AND u.is_active = 1
@@ -182,12 +200,28 @@ class WatchBotDB:
         
         topics = []
         for row in cursor.fetchall():
-            topics.append({
-                'id': row[0],
-                'user_id': row[1],
-                'topic': row[2],
-                'last_checked': row[3]
-            })
+            topic_id, user_id, topic, last_checked, check_interval = row
+            
+            # בדיקה אם הגיע הזמן לבדוק את הנושא
+            should_check = False
+            
+            if not last_checked:
+                should_check = True
+            else:
+                last_check_time = datetime.fromisoformat(last_checked)
+                time_diff = current_time - last_check_time
+                
+                if time_diff >= timedelta(hours=check_interval):
+                    should_check = True
+            
+            if should_check:
+                topics.append({
+                    'id': topic_id,
+                    'user_id': user_id,
+                    'topic': topic,
+                    'last_checked': last_checked,
+                    'check_interval': check_interval
+                })
         
         conn.close()
         return topics
@@ -229,6 +263,57 @@ class WatchBotDB:
         ''', (topic_id,))
         conn.commit()
         conn.close()
+    
+    def get_user_usage(self, user_id: int) -> Dict[str, int]:
+        """קבלת נתוני שימוש של משתמש"""
+        current_month = datetime.now().strftime("%Y-%m")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT usage_count FROM usage_stats
+            WHERE user_id = ? AND month = ?
+        ''', (user_id, current_month))
+        
+        result = cursor.fetchone()
+        current_usage = result[0] if result else 0
+        
+        conn.close()
+        return {
+            'current_usage': current_usage,
+            'monthly_limit': MONTHLY_LIMIT,
+            'remaining': MONTHLY_LIMIT - current_usage
+        }
+    
+    def increment_usage(self, user_id: int) -> bool:
+        """עדכון שימוש של משתמש - מחזיר True אם עדיין יש מקום"""
+        current_month = datetime.now().strftime("%Y-%m")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # בדיקת השימוש הנוכחי
+        cursor.execute('''
+            SELECT usage_count FROM usage_stats
+            WHERE user_id = ? AND month = ?
+        ''', (user_id, current_month))
+        
+        result = cursor.fetchone()
+        current_usage = result[0] if result else 0
+        
+        if current_usage >= MONTHLY_LIMIT:
+            conn.close()
+            return False
+        
+        # עדכון השימוש
+        cursor.execute('''
+            INSERT OR REPLACE INTO usage_stats (user_id, month, usage_count)
+            VALUES (?, ?, ?)
+        ''', (user_id, current_month, current_usage + 1))
+        
+        conn.commit()
+        conn.close()
+        return True
 
 class SmartWatcher:
     """מחלקה לניהול המעקב החכם עם GPT Browsing"""
@@ -236,8 +321,12 @@ class SmartWatcher:
     def __init__(self, db: WatchBotDB):
         self.db = db
     
-    def search_and_analyze_topic(self, topic: str) -> List[Dict]:
+    def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict]:
         """חיפוש ואנליזה של נושא עם GPT Browsing"""
+        # בדיקת מגבלת שימוש אם סופק user_id
+        if user_id and not self.db.increment_usage(user_id):
+            return []  # חריגה ממגבלת השימוש
+        
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
             
@@ -321,31 +410,53 @@ def run_flask():
     """הרצת שרת Flask ברקע"""
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
+def get_main_menu_keyboard():
+    """יצירת תפריט הכפתורים הראשי"""
+    keyboard = [
+        [InlineKeyboardButton("📌 הוסף נושא חדש", callback_data="add_topic")],
+        [InlineKeyboardButton("📋 הצג רשימת נושאים", callback_data="list_topics")],
+        [InlineKeyboardButton("⏸️ השבת מעקב", callback_data="pause_tracking"),
+         InlineKeyboardButton("▶️ הפעל מחדש", callback_data="resume_tracking")],
+        [InlineKeyboardButton("📊 שימוש נוכחי", callback_data="usage_stats"),
+         InlineKeyboardButton("❓ עזרה", callback_data="help")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_frequency_keyboard():
+    """יצירת תפריט בחירת תדירות"""
+    keyboard = [
+        [InlineKeyboardButton("כל 6 שעות", callback_data="freq_6")],
+        [InlineKeyboardButton("כל 12 שעות", callback_data="freq_12")],
+        [InlineKeyboardButton("כל 24 שעות (ברירת מחדל)", callback_data="freq_24")],
+        [InlineKeyboardButton("כל 48 שעות", callback_data="freq_48")],
+        [InlineKeyboardButton("אחת ל-7 ימים", callback_data="freq_168")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 # פקודות הבוט
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת התחלה"""
     user = update.effective_user
     db.add_user(user.id, user.username)
     
-    welcome_message = """
+    # קבלת נתוני שימוש
+    usage_info = db.get_user_usage(user.id)
+    
+    welcome_message = f"""
 🤖 ברוכים הבאים לבוט המעקב החכם!
 
 אני עוזר לכם לעקוב אחרי נושאים שמעניינים אתכם ומתריע כשיש מידע חדש.
 
 🧠 אני משתמש ב-GPT-4o עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
 
-פקודות זמינות:
-📌 /watch <נושא> - הוספת נושא למעקב
-📋 /list - רשימת הנושאים שלכם
-🗑️ /remove <נושא/ID> - הסרת נושא
-⏸️ /pause - השבתת כל ההתראות
-▶️ /resume - הפעלת ההתראות
-❓ /help - עזרה מפורטת
+📊 **מגבלת השימוש החודשית:**
+🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
+⏳ נותרו לך {usage_info['remaining']} בדיקות החודש
 
-דוגמה: /watch בינה מלאכותית 2024
+בחרו פעולה מהתפריט למטה:
 """
     
-    await update.message.reply_text(welcome_message)
+    await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard())
 
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הוספת נושא למעקב"""
@@ -373,13 +484,14 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topics = db.get_user_topics(user_id)
     
     if not topics:
-        await update.message.reply_text("📭 אין לכם נושאים במעקב כרגע.\nהשתמשו ב-/watch כדי להוסיף נושא.")
+        message = "📭 אין לכם נושאים במעקב כרגע.\nהשתמשו בכפתור 'הוסף נושא חדש' כדי להתחיל."
+        await update.message.reply_text(message, reply_markup=get_main_menu_keyboard())
         return
     
     message = "📋 הנושאים שלכם במעקב:\n\n"
     
     for i, topic in enumerate(topics, 1):
-        status = "🟢" if topic['is_active'] else "🔴"
+        status = "🟢"  # כל הנושאים פעילים (אחרת הם לא מוצגים)
         last_check = topic['last_checked'] or "מעולם לא"
         if last_check != "מעולם לא":
             # קיצור התאריך להצגה נוחה יותר
@@ -388,13 +500,23 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
+        # הוספת מידע על תדירות הבדיקה
+        freq_text = {
+            6: "כל 6 שעות",
+            12: "כל 12 שעות", 
+            24: "כל 24 שעות",
+            48: "כל 48 שעות",
+            168: "אחת לשבוע"
+        }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+        
         message += f"{i}. {status} {topic['topic']}\n"
-        message += f"   🆔 {topic['id']} | 🕐 נבדק: {last_check}\n\n"
+        message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
+        message += f"   🕐 נבדק: {last_check}\n\n"
     
     # הוספת כפתורי פעולה
     keyboard = [
-        [InlineKeyboardButton("🔄 רענון רשימה", callback_data="refresh_list")],
-        [InlineKeyboardButton("➕ הוסף נושא", callback_data="add_topic")]
+        [InlineKeyboardButton("🔄 רענון רשימה", callback_data="list_topics")],
+        [InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -496,15 +618,38 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT COUNT(*) FROM found_results WHERE found_at > datetime('now', '-24 hours')")
     results_today = cursor.fetchone()[0]
     
+    # סטטיסטיקות שימוש חודשיות
+    current_month = datetime.now().strftime("%Y-%m")
+    cursor.execute("SELECT COUNT(*), SUM(usage_count) FROM usage_stats WHERE month = ?", (current_month,))
+    usage_stats = cursor.fetchone()
+    users_with_usage = usage_stats[0] if usage_stats[0] else 0
+    total_usage_this_month = usage_stats[1] if usage_stats[1] else 0
+    
+    # משתמשים שהגיעו למגבלה
+    cursor.execute("SELECT COUNT(*) FROM usage_stats WHERE month = ? AND usage_count >= ?", (current_month, MONTHLY_LIMIT))
+    users_at_limit = cursor.fetchone()[0]
+    
     conn.close()
     
     stats_message = f"""
 📊 **סטטיסטיקות הבוט**
 
-👥 משתמשים: {active_users}/{total_users} (פעילים/סה"כ)
-📌 נושאים פעילים: {active_topics}
-🔍 תוצאות שנמצאו: {total_results}
-📈 תוצאות היום: {results_today}
+👥 **משתמשים:**
+• סה"כ: {total_users}
+• פעילים: {active_users}
+• השתמשו החודש: {users_with_usage}
+• הגיעו למגבלה: {users_at_limit}
+
+📌 **נושאים:**
+• נושאים פעילים: {active_topics}
+
+🔍 **תוצאות:**
+• סה"כ תוצאות: {total_results}
+• תוצאות היום: {results_today}
+
+📊 **שימוש GPT החודש:**
+• סה"כ שאילתות: {total_usage_this_month}
+• ממוצע למשתמש: {total_usage_this_month/users_with_usage if users_with_usage > 0 else 0:.1f}
 
 🧠 משתמש ב-GPT-4o עם browsing
 """
@@ -524,6 +669,7 @@ async def test_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(f"🔍 בודק נושא: {topic}\nרגע...")
     
     try:
+        # אדמין לא מוגבל במכסה
         results = smart_watcher.search_and_analyze_topic(topic)
         
         if results:
@@ -552,8 +698,27 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
         try:
             logger.info(f"Checking topic: {topic['topic']} (ID: {topic['id']})")
             
+            # בדיקת מגבלת שימוש לפני הבדיקה
+            usage_info = db.get_user_usage(topic['user_id'])
+            if usage_info['remaining'] <= 0:
+                logger.info(f"User {topic['user_id']} has reached monthly limit, skipping topic {topic['id']}")
+                
+                # שליחת הודעה למשתמש שהגיע למגבלה (פעם אחת בחודש)
+                try:
+                    await context.bot.send_message(
+                        chat_id=topic['user_id'],
+                        text=f"📊 הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\n"
+                             f"המעקב יתחדש אוטומטיות בתחילת החודש הבא.\n\n"
+                             f"🔍 להצגת פרטי השימוש: /start ← 📊 שימוש נוכחי",
+                        reply_markup=get_main_menu_keyboard()
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send limit notification to user {topic['user_id']}: {e}")
+                
+                continue
+            
             # חיפוש תוצאות עם GPT Browsing
-            results = smart_watcher.search_and_analyze_topic(topic['topic'])
+            results = smart_watcher.search_and_analyze_topic(topic['topic'], topic['user_id'])
             
             if results:
                 logger.info(f"Found {len(results)} results for topic {topic['id']}")
@@ -614,17 +779,240 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Finished checking {len(topics)} topics")
 
+# משתנים גלובליים לניהול מצבים
+user_states = {}
+
 # פונקציות callback
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בלחיצות כפתורים"""
     query = update.callback_query
     await query.answer()
     
-    if query.data == "refresh_list":
-        # רענון רשימת הנושאים
-        await list_command(update, context)
-    elif query.data == "add_topic":
-        await query.edit_message_text("השתמשו בפקודה: /watch <נושא חדש>")
+    user_id = query.from_user.id
+    data = query.data
+    
+    try:
+        if data == "main_menu":
+            # חזרה לתפריט הראשי
+            usage_info = db.get_user_usage(user_id)
+            message = f"""
+🤖 תפריט ראשי - בוט המעקב החכם
+
+📊 **מגבלת השימוש החודשית:**
+🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
+⏳ נותרו לך {usage_info['remaining']} בדיקות החודש
+
+בחרו פעולה:
+"""
+            await query.edit_message_text(message, reply_markup=get_main_menu_keyboard())
+            
+        elif data == "add_topic":
+            # הוספת נושא חדש
+            user_states[user_id] = {"state": "waiting_for_topic"}
+            await query.edit_message_text(
+                "📝 אנא שלחו את הנושא שתרצו לעקוב אחריו:\n\nדוגמה: בינה מלאכותית 2024",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ביטול", callback_data="main_menu")]])
+            )
+            
+        elif data == "list_topics":
+            # הצגת רשימת נושאים
+            await show_topics_list(query, user_id)
+            
+        elif data == "pause_tracking":
+            # השבתת מעקב
+            db.toggle_user_status(user_id, False)
+            await query.edit_message_text(
+                "⏸️ המעקב הושבת בהצלחה!\nלא תקבלו התראות עד להפעלה מחדש.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+            )
+            
+        elif data == "resume_tracking":
+            # הפעלת מעקב מחדש
+            db.toggle_user_status(user_id, True)
+            await query.edit_message_text(
+                "▶️ המעקב הופעל מחדש!\nתקבלו התראות על עדכונים חדשים.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+            )
+            
+        elif data == "usage_stats":
+            # הצגת סטטיסטיקות שימוש
+            await show_usage_stats(query, user_id)
+            
+        elif data == "help":
+            # הצגת עזרה
+            await show_help(query)
+            
+        elif data.startswith("freq_"):
+            # בחירת תדירות לנושא חדש
+            frequency = int(data.split("_")[1])
+            if user_id in user_states and "pending_topic" in user_states[user_id]:
+                topic = user_states[user_id]["pending_topic"]
+                
+                # בדיקת מגבלת שימוש
+                usage_info = db.get_user_usage(user_id)
+                if usage_info['remaining'] <= 0:
+                    await query.edit_message_text(
+                        f"❌ הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\nתוכל להמשיך בתחילת החודש הבא.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                    )
+                    return
+                
+                topic_id = db.add_watch_topic(user_id, topic, frequency)
+                
+                freq_text = {
+                    6: "כל 6 שעות",
+                    12: "כל 12 שעות", 
+                    24: "כל 24 שעות",
+                    48: "כל 48 שעות",
+                    168: "אחת ל-7 ימים"
+                }.get(frequency, f"כל {frequency} שעות")
+                
+                await query.edit_message_text(
+                    f"✅ הנושא נוסף בהצלחה!\n\n"
+                    f"📝 נושא: {topic}\n"
+                    f"🆔 מזהה: {topic_id}\n"
+                    f"⏰ תדירות בדיקה: {freq_text}\n\n"
+                    f"🧠 אני אשתמש ב-GPT עם browsing לחיפוש מידע עדכני",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                )
+                
+                # ניקוי מצב המשתמש
+                del user_states[user_id]
+            
+    except Exception as e:
+        logger.error(f"Error in button callback: {e}")
+        await query.edit_message_text(
+            "❌ אירעה שגיאה. אנא נסו שוב.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+
+async def show_topics_list(query, user_id):
+    """הצגת רשימת נושאים"""
+    topics = db.get_user_topics(user_id)
+    
+    if not topics:
+        message = "📭 אין לכם נושאים במעקב כרגע.\nהשתמשו בכפתור 'הוסף נושא חדש' כדי להתחיל."
+        await query.edit_message_text(message, reply_markup=get_main_menu_keyboard())
+        return
+    
+    message = "📋 הנושאים שלכם במעקב:\n\n"
+    
+    for i, topic in enumerate(topics, 1):
+        status = "🟢"
+        last_check = topic['last_checked'] or "מעולם לא"
+        if last_check != "מעולם לא":
+            try:
+                last_check = datetime.fromisoformat(last_check).strftime("%d/%m %H:%M")
+            except:
+                pass
+        
+        freq_text = {
+            6: "כל 6 שעות",
+            12: "כל 12 שעות", 
+            24: "כל 24 שעות",
+            48: "כל 48 שעות",
+            168: "אחת לשבוע"
+        }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+        
+        message += f"{i}. {status} {topic['topic']}\n"
+        message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
+        message += f"   🕐 נבדק: {last_check}\n\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 רענון רשימה", callback_data="list_topics")],
+        [InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(message, reply_markup=reply_markup)
+
+async def show_usage_stats(query, user_id):
+    """הצגת סטטיסטיקות שימוש"""
+    usage_info = db.get_user_usage(user_id)
+    current_month = datetime.now().strftime("%B %Y")
+    
+    percentage = (usage_info['current_usage'] / usage_info['monthly_limit']) * 100
+    
+    # יצירת בר התקדמות
+    filled_blocks = int(percentage / 10)
+    progress_bar = "█" * filled_blocks + "░" * (10 - filled_blocks)
+    
+    message = f"""
+📊 **סטטיסטיקות השימוש שלכם**
+
+📅 חודש נוכחי: {current_month}
+
+🔍 **שאילתות GPT:**
+{progress_bar} {percentage:.1f}%
+
+📈 השתמשת: {usage_info['current_usage']} / {usage_info['monthly_limit']}
+⏳ נותרו: {usage_info['remaining']} בדיקות
+
+💡 **טיפ:** כל בדיקה (אוטומטית או ידנית) נחשבת כשאילתה אחת.
+"""
+    
+    await query.edit_message_text(
+        message, 
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+    )
+
+async def show_help(query):
+    """הצגת מסך עזרה"""
+    help_text = """
+🤖 **מדריך השימוש בבוט המעקב החכם**
+
+🔍 **איך זה עובד?**
+• הבוט בודק את הנושאים שלכם לפי התדירות שבחרתם
+• משתמש ב-GPT-4o עם browsing לחיפוש באינטרנט
+• מוצא מידע עדכני ורלוונטי בלבד
+• שולח לכם רק תוכן חדש שלא ראיתם
+
+📊 **מגבלת שימוש:**
+• 100 בדיקות GPT לחודש לכל משתמש
+• המגבלה מתאפסת בתחילת כל חודש
+• כל בדיקה (אוטומטית/ידנית) נספרת
+
+⏰ **תדירויות בדיקה זמינות:**
+• כל 6 שעות - לנושאים דחופים
+• כל 12 שעות - לחדשות חמות  
+• כל 24 שעות - ברירת מחדל
+• כל 48 שעות - למעקב רגיל
+• אחת ל-7 ימים - לנושאים כלליים
+
+💡 **טיפים לשימוש יעיל:**
+• השתמשו בנושאים ספציפיים
+• הוסיפו מילות מפתח נוספות
+• בחרו תדירות מתאימה לסוג הנושא
+"""
+    
+    await query.edit_message_text(
+        help_text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+    )
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """טיפול בהודעות טקסט"""
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # בדיקה אם המשתמש במצב המתנה להוספת נושא
+    if user_id in user_states and user_states[user_id].get("state") == "waiting_for_topic":
+        # שמירת הנושא ובקשה לבחירת תדירות
+        user_states[user_id] = {"pending_topic": text}
+        
+        await update.message.reply_text(
+            f"📝 הנושא שנבחר: {text}\n\nאנא בחרו תדירות בדיקה:",
+            reply_markup=get_frequency_keyboard()
+        )
+        return
+    
+    # אם אין מצב מיוחד, הצגת התפריט הראשי
+    await update.message.reply_text(
+        "🤖 בחרו פעולה מהתפריט:",
+        reply_markup=get_main_menu_keyboard()
+    )
 
 def main():
     """פונקציה ראשית"""
@@ -647,6 +1035,7 @@ def main():
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("test_search", test_search_command))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
     # הוספת מתזמן למשימות אוטומטיות
     job_queue = application.job_queue
