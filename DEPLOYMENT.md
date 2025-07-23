@@ -97,7 +97,7 @@ curl https://your-bot-url.onrender.com/
 
 ### פקודות לבדיקה בבוט
 1. `/start` - הודעת ברוכים הבאים
-2. `/watch AI news` - הוספת נושא לבדיקה
+2. `/watch Galaxy Tab S11 Ultra` - הוספת נושא לבדיקה
 3. `/list` - צפייה ברשימה
 4. `/stats` - סטטיסטיקות (אדמין בלבד)
 
