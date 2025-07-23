@@ -4,7 +4,7 @@
 
 ### ✅ הכנת המפתחות
 - [ ] יצירת בוט טלגרם ב-@BotFather
-- [ ] קבלת OpenAI API Key (עם אשראי ותמיכה ב-browsing)
+- [ ] קבלת Groq API Key מ-console.groq.com
 - [ ] קבלת Telegram User ID שלכם (שלחו /start ל-@userinfobot)
 
 ### ✅ הכנת הקוד
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 # הגדרת משתני סביבה
 export BOT_TOKEN="your_bot_token"
-export OPENAI_API_KEY="your_openai_key"
+export GROQ_API_KEY="your_groq_key"
 export ADMIN_ID="your_telegram_id"
 export DB_PATH="./test.db"
 export PORT="5000"
@@ -61,7 +61,7 @@ Runtime: Docker
 | Key | Value |
 |-----|-------|
 | `BOT_TOKEN` | Token מ-@BotFather |
-| `OPENAI_API_KEY` | Key מ-OpenAI (עם browsing) |
+| `GROQ_API_KEY` | Key מ-Groq API |
 | `ADMIN_ID` | ה-User ID שלכם |
 
 ### שלב 4: אחסון קבוע
@@ -150,7 +150,7 @@ git push origin main
 
 ### מעקב עלויות
 - **Render**: בדקו שעות שימוש בחינמית
-- **OpenAI**: עקבו אחרי usage ב-dashboard
+- **Groq**: עקבו אחרי usage ו-rate limits ב-dashboard
 - **Bing**: 1000 שאילתות חינם/חודש
 
 ## 🎯 טיפים לאופטימיזציה
