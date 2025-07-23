@@ -28,7 +28,7 @@ DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
 
 # קבועים
-MONTHLY_LIMIT = 100  # מגבלת שאילתות חודשית
+MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
 
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -1252,7 +1252,7 @@ async def show_help(query):
 • שולח לכם רק תוכן חדש שלא ראיתם
 
 📊 **מגבלת שימוש:**
-• 100 בדיקות GPT לחודש לכל משתמש
+• 200 בדיקות GPT לחודש לכל משתמש
 • המגבלה מתאפסת בתחילת כל חודש
 • כל בדיקה (אוטומטית/ידנית) נספרת
 
