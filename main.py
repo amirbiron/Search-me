@@ -11,7 +11,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from openai import OpenAI
+import requests
 
 # הגדרת לוגינג
 logging.basicConfig(
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+PERPLEXITY_API_KEY = os.getenv('PERPLEXITY_API_KEY')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
@@ -33,11 +33,17 @@ MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# יצירת לקוח Groq (באמצעות OpenAI SDK)
-openai_client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1"
-)
+# בדיקת מפתח Perplexity API
+if not PERPLEXITY_API_KEY:
+    logger.error("PERPLEXITY_API_KEY environment variable is required")
+    exit(1)
+
+# הגדרות Perplexity API
+PERPLEXITY_BASE_URL = "https://api.perplexity.ai/chat/completions"
+PERPLEXITY_HEADERS = {
+    "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+    "Content-Type": "application/json"
+}
 
 class WatchBotDB:
     """מחלקה לניהול בסיס הנתונים"""
@@ -357,13 +363,13 @@ class WatchBotDB:
         return True
 
 class SmartWatcher:
-    """מחלקה לניהול המעקב החכם עם Groq Llama3 Browsing"""
+    """מחלקה לניהול המעקב החכם עם Perplexity API"""
     
     def __init__(self, db: WatchBotDB):
         self.db = db
     
     def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict]:
-        """חיפוש ואנליזה של נושא עם Groq Llama3 Browsing"""
+        """חיפוש ואנליזה של נושא עם Perplexity API"""
         # בדיקת מגבלת שימוש אם סופק user_id
         if user_id:
             usage_info = self.db.get_user_usage(user_id)
@@ -401,29 +407,41 @@ class SmartWatcher:
 חפש עכשיו ברשת מידע עדכני על: {topic}
 """
             
-            response = openai_client.chat.completions.create(
-                model="llama3-70b-8192",
-                messages=[
+            # יצירת הבקשה ל-Perplexity API
+            payload = {
+                "model": "llama-3.1-sonar-large-128k-online",
+                "messages": [
                     {
                         "role": "system", 
-                        "content": "You are a smart web researcher with browsing capabilities. Always search the web for current information and return valid JSON format results."
+                        "content": "You are a smart web researcher with browsing capabilities. Always search the web for current information and return valid JSON format results. Answer in Hebrew when the user writes in Hebrew."
                     },
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=2000,
-                temperature=0.3
+                "max_tokens": 2000,
+                "temperature": 0.3,
+                "stream": False
+            }
+            
+            response = requests.post(
+                PERPLEXITY_BASE_URL,
+                json=payload,
+                headers=PERPLEXITY_HEADERS,
+                timeout=30
             )
             
-            logger.info(f"🔍 Groq raw response for topic '{topic}': {response}")
+            response.raise_for_status()
+            response_data = response.json()
             
-            # עדכון המונה רק לאחר שאילתת Groq מוצלחת
+            logger.info(f"🔍 Perplexity raw response for topic '{topic}': {response_data}")
+            
+            # עדכון המונה רק לאחר שאילתת Perplexity מוצלחת
             if user_id:
                 self.db.increment_usage(user_id)
             
             # ניסיון לפרס את ה-JSON
-            response_text = response.choices[0].message.content
+            response_text = response_data['choices'][0]['message']['content']
             if not response_text:
-                logger.warning(f"Empty response from Groq for topic '{topic}'")
+                logger.warning(f"Empty response from Perplexity for topic '{topic}'")
                 return []
             
             response_text = response_text.strip()
@@ -483,15 +501,18 @@ class SmartWatcher:
                             logger.warning(f"Skipping non-dict result: {result}")
                     return valid_results
                 else:
-                    logger.warning(f"Groq returned non-list result: {results}")
+                    logger.warning(f"Perplexity returned non-list result: {results}")
                     return []
             except json.JSONDecodeError as json_error:
                 logger.error(f"Failed to parse JSON response for topic '{topic}'. Error: {json_error}")
                 logger.debug(f"Raw response text: {response_text[:500]}...")  # רק 500 תווים ראשונים
                 return []
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error in Perplexity API request for topic '{topic}': {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error in Groq browsing search for topic '{topic}': {e}")
+            logger.error(f"Error in Perplexity search for topic '{topic}': {e}")
             # במקרה של שגיאה, נחזיר רשימה ריקה כדי שהבוט ימשיך לפעול
             return []
 
@@ -551,7 +572,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 אני עוזר לכם לעקוב אחרי נושאים שמעניינים אתכם ומתריע כשיש מידע חדש.
 
-🧠 אני משתמש ב-Groq Llama3-70B עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
+🧠 אני משתמש ב-Perplexity AI עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
 
 📊 **מגבלת השימוש החודשית:**
 🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
@@ -587,7 +608,7 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 נושא: {topic}\n"
         f"🆔 מזהה: {topic_id}\n"
         f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n"
-        f"🧠 אני אשתמש ב-Groq Llama3 עם browsing לחיפוש מידע עדכני\n\n"
+        f"🧠 אני אשתמש ב-Perplexity AI עם browsing לחיפוש מידע עדכני\n\n"
         f"אבדוק אותו כל 24 שעות ואתריע על תוכן חדש."
     )
 
@@ -688,7 +709,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם כל 24 שעות
-• משתמש ב-Groq Llama3-70B עם browsing לחיפוש באינטרנט
+• משתמש ב-Perplexity AI עם browsing לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שומר היסטוריה כדי למנוע כפילויות
 • שולח לכם רק תוכן חדש שלא ראיתם
@@ -700,7 +721,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • הבוט זוכר מה כבר נשלח אליכם
 
 🧠 **טכנולוגיה:**
-הבוט משתמש ב-Groq Llama3-70B עם יכולות browsing מתקדמות לחיפוש והערכה של מידע ברשת.
+הבוט משתמש ב-Perplexity AI עם יכולות browsing מתקדמות לחיפוש והערכה של מידע ברשת.
 """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -761,11 +782,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • סה"כ תוצאות: {total_results}
 • תוצאות היום: {results_today}
 
-📊 **שימוש Groq החודש:**
+📊 **שימוש Perplexity החודש:**
 • סה"כ שאילתות: {total_usage_this_month}
 • ממוצע למשתמש: {total_usage_this_month/users_with_usage if users_with_usage > 0 else 0:.1f}
 
-🧠 משתמש ב-Groq Llama3-70B עם browsing
+🧠 משתמש ב-Perplexity AI עם browsing
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
@@ -836,7 +857,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             return
         
-        # חיפוש תוצאות עם Groq Browsing
+        # חיפוש תוצאות עם Perplexity API
         results = smart_watcher.search_and_analyze_topic(topic['topic'], user_id)
         
         if results:
@@ -970,7 +991,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                 
                 continue
             
-            # חיפוש תוצאות עם Groq Browsing
+            # חיפוש תוצאות עם Perplexity API
             results = smart_watcher.search_and_analyze_topic(topic['topic'], topic['user_id'])
             
             if results:
@@ -1140,7 +1161,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆔 מזהה: {topic_id}\n"
                     f"⏰ תדירות בדיקה: {freq_text}\n"
                     f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n\n"
-                    f"🧠 אני אשתמש ב-Groq Llama3 עם browsing לחיפוש מידע עדכני",
+                    f"🧠 אני אשתמש ב-Perplexity AI עם browsing לחיפוש מידע עדכני",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
                 )
                 
@@ -1228,7 +1249,7 @@ async def show_usage_stats(query, user_id):
 
 📅 חודש נוכחי: {current_month}
 
-🔍 **שאילתות Groq:**
+🔍 **שאילתות Perplexity:**
 {progress_bar} {percentage:.1f}%
 
 📈 השתמשת: {usage_info['current_usage']} / {usage_info['monthly_limit']}
@@ -1250,12 +1271,12 @@ async def show_help(query):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם לפי התדירות שבחרתם
-• משתמש ב-Groq Llama3-70B עם browsing לחיפוש באינטרנט
+• משתמש ב-Perplexity AI עם browsing לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שולח לכם רק תוכן חדש שלא ראיתם
 
 📊 **מגבלת שימוש:**
-• 200 בדיקות Groq לחודש לכל משתמש
+• 200 בדיקות Perplexity לחודש לכל משתמש
 • המגבלה מתאפסת בתחילת כל חודש
 • כל בדיקה (אוטומטית/ידנית) נספרת
 
