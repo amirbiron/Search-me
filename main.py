@@ -409,7 +409,7 @@ class SmartWatcher:
             
             # יצירת הבקשה ל-Perplexity API
             payload = {
-                "model": "llama-3.1-sonar-large-128k-online",
+                "model": "sonar-medium-chat",
                 "messages": [
                     {
                         "role": "system", 
