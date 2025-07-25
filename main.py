@@ -578,7 +578,7 @@ def perform_search(query: str) -> list[dict]:
         formatted_results = []
         for result in search_results:
             formatted_results.append({
-                'title': result.get('title', 'No Title'),
+                'title': result.get('title', 'ללא כותרת'),
                 'link': result.get('url', '#')
             })
             
