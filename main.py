@@ -19,12 +19,14 @@ import requests
 # הגדרת לוגינג
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=os.getenv("LOG_LEVEL", "INFO")
 )
 logger = logging.getLogger(__name__)
 
 # --- הגדרות ה-API של Tavily ---
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+assert TAVILY_API_KEY and TAVILY_API_KEY.strip(), "TAVILY_API_KEY is missing or empty"
+logger.info(f"Tavily key prefix: {TAVILY_API_KEY[:4]}***")  # sanity only
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
 # משתני סביבה
@@ -369,20 +371,48 @@ class WatchBotDB:
         conn.close()
         return True
 
+def tavily_search(query: str, **kwargs):
+    """
+    Enhanced Tavily search with logging and error handling.
+    """
+    logger.info(f"Tavily query: {query} | kwargs={kwargs}")
+    try:
+        resp = tavily_client.search(
+            query=query,
+            include_answer=True,
+            max_results=10,
+            search_depth="advanced",
+            **kwargs
+        )
+        logger.debug(f"Tavily raw response: {resp}")
+        if not resp or not resp.get("results"):
+            logger.warning("Tavily returned empty results")
+        return resp
+    except Exception as e:
+        logger.exception("Tavily search failed")
+        raise
+
 def perform_search(query: str) -> list[dict]:
     """
-    Performs a search using the Tavily API.
+    Performs a search using the Tavily API with fallback for empty results.
     Returns a list of dictionaries, each containing 'title' and 'link'.
     """
-    if not TAVILY_API_KEY:
-        logger.error("TAVILY_API_KEY environment variable is not set or empty.")
-        return []
-
     try:
-        # שימוש במשתנה המתוקן: tavily_client
-        response = tavily_client.search(query=query, search_depth="advanced", max_results=7)
-        
+        # First attempt
+        response = tavily_search(query, max_results=7)
         search_results = response.get('results', [])
+        
+        # If empty, try with different parameters
+        if not search_results:
+            logger.warning(f"First Tavily search returned empty results for query: {query}")
+            response = tavily_search(query, max_results=10, search_depth="basic")
+            search_results = response.get('results', [])
+            
+            # If still empty, raise clear error
+            if not search_results:
+                error_msg = f"Tavily returned no results after 2 attempts for query: '{query}'"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
         
         formatted_results = []
         for result in search_results:
@@ -391,6 +421,7 @@ def perform_search(query: str) -> list[dict]:
                 'link': result.get('url', '#')
             })
             
+        logger.info(f"Successfully retrieved {len(formatted_results)} search results")
         return formatted_results
 
     except Exception as e:
@@ -1447,5 +1478,26 @@ def main():
     # הפעלת הבוט
     application.run_polling(drop_pending_updates=True)
 
+def run_smoke_test():
+    """Run smoke test for Tavily integration."""
+    try:
+        logger.info("🔍 Running Tavily smoke test...")
+        
+        # Test basic search
+        test = tavily_search("What is OpenAI?", include_images=False)
+        assert test and test.get("results"), "Smoke test failed: Tavily returned no results"
+        
+        logger.info(f"✅ Smoke test passed: Found {len(test.get('results', []))} results")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Smoke test failed: {e}")
+        return False
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        success = run_smoke_test()
+        sys.exit(0 if success else 1)
+    else:
+        main()
