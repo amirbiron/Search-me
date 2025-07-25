@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import asyncio
 import re
-from openai import OpenAI
+from tavily import Tavily
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
@@ -23,9 +23,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- הגדרות ה-API של Perplexity ---
-API_KEY = os.getenv("PERPLEXITY_API_KEY")
-client = OpenAI(api_key=API_KEY, base_url="https://api.perplexity.ai")
+# --- הגדרות ה-API של Tavily ---
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+tavily_client = Tavily(api_key=TAVILY_API_KEY)
 
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -371,59 +371,32 @@ class WatchBotDB:
 
 def perform_search(query: str) -> list[dict]:
     """
-    Performs a search using the Perplexity API.
+    Performs a search using the Tavily API.
     Returns a list of dictionaries, each containing 'title' and 'link'.
     """
-    if not API_KEY:
-        logger.error("PERPLEXITY_API_KEY environment variable is not set or empty.")
+    if not TAVILY_API_KEY:
+        logger.error("TAVILY_API_KEY environment variable is not set or empty.")
         return []
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an expert AI search assistant. You MUST respond with ONLY a markdown-formatted list of the top 5-7 web search results for the user's query. "
-                "Do not add any introductory text, conversation, or summaries. Your entire response must be only the list. "
-                "Each line must strictly follow the format: - [Result Title](URL)"
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"Search query: {query}",
-        },
-    ]
-
     try:
-        response = client.chat.completions.create(
-            model="llama-3-8b-instruct",
-            messages=messages,
-        )
-        content = response.choices[0].message.content
+        # ביצוע החיפוש באמצעות הלקוח של Tavily
+        response = tavily_client.search(query=query, search_depth="advanced", max_results=7)
         
-        # ================== קוד דיבאגינג קריטי ==================
-        # הקוד הבא ידפיס ללוגים את התשובה המדויקת מה-API
-        print("\n\n" + "="*25 + " RAW API RESPONSE " + "="*25)
-        print(f"QUERY SENT TO API: '{query}'")
-        print("-" * 70)
-        print("CONTENT RECEIVED FROM API:")
-        print(content)
-        print("=" * 70 + "\n\n")
-        # ========================================================
+        # התוצאות נמצאות תחת המפתח 'results'
+        search_results = response.get('results', [])
         
-        results = []
-        matches = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
-        
-        for match in matches:
-            title, link = match
-            results.append({'title': title.strip(), 'link': link.strip()})
-        
-        if not results:
-             logger.warning(f"Could not parse any results from the model's response for query: '{query}'.")
-
-        return results
+        # המרת התוצאות לפורמט שהבוט מצפה לו
+        formatted_results = []
+        for result in search_results:
+            formatted_results.append({
+                'title': result.get('title', 'No Title'),
+                'link': result.get('url', '#')  # שינוי שם המפתח מ-'url' ל-'link'
+            })
+            
+        return formatted_results
 
     except Exception as e:
-        logger.error(f"An error occurred while calling the Perplexity API: {e}")
+        logger.error(f"An error occurred during Tavily API call: {e}")
         return []
 
 class SmartWatcher:
