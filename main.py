@@ -428,14 +428,16 @@ def tavily_search(query: str, **kwargs) -> Dict[str, Any]:
         return raw_result
 
 def normalize_tavily_links_only(resp: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Return only title+url, ignore english snippets/answer."""
+    """Return only title+url with Hebrew translation, ignore english snippets/answer."""
     out: List[Dict[str, str]] = []
     for r in resp.get("results", [])[:5]:
         title = (r.get("title") or "").strip()
         url = r.get("url")
         if not url:
             continue
-        out.append({"title": title, "url": url})
+        # תרגום הכותרת לעברית
+        hebrew_title = translate_title_to_hebrew(title)
+        out.append({"title": hebrew_title, "url": url})
     return out
 
 def decrement_credits(user_id: int, used: int = 1) -> int:
@@ -508,11 +510,14 @@ def normalize_tavily(tavily_res: dict) -> List[Dict]:
         title = result.get('title', 'ללא כותרת')
         url = result.get('url', '')
         
+        # תרגום הכותרת לעברית
+        hebrew_title = translate_title_to_hebrew(title)
+        
         # Create Hebrew summary instead of using Tavily content
-        summary = f"מקור מידע זמין בקישור - {title[:100]}{'...' if len(title) > 100 else ''}"
+        summary = f"מקור מידע זמין בקישור - {hebrew_title[:100]}{'...' if len(hebrew_title) > 100 else ''}"
         
         formatted_results.append({
-            'title': title,
+            'title': hebrew_title,
             'url': url,
             'summary': summary,
             'relevance_score': 8,
@@ -525,6 +530,73 @@ def is_valid_result(r: dict) -> bool:
     """Check if result has required title and url fields"""
     return bool(r.get("title") and r.get("url"))
 
+def translate_title_to_hebrew(title: str) -> str:
+    """תרגום כותרת מאנגלית לעברית - תרגום פשוט של מילות מפתח נפוצות"""
+    if not title:
+        return "מידע חדש"
+    
+    # מילון תרגום למילות מפתח נפוצות
+    translations = {
+        # טכנולוגיה
+        "technology": "טכנולוגיה",
+        "tech": "טכנולוגיה", 
+        "AI": "בינה מלאכותית",
+        "artificial intelligence": "בינה מלאכותית",
+        "smartphone": "סמארטפון",
+        "tablet": "טאבלט",
+        "laptop": "מחשב נייד",
+        "computer": "מחשב",
+        "software": "תוכנה",
+        "hardware": "חומרה",
+        "app": "אפליקציה",
+        "application": "אפליקציה",
+        "update": "עדכון",
+        "release": "שחרור",
+        "launch": "השקה",
+        "announcement": "הכרזה",
+        "review": "ביקורת",
+        "news": "חדשות",
+        "report": "דיווח",
+        "analysis": "ניתוח",
+        "feature": "תכונה",
+        "features": "תכונות",
+        "price": "מחיר",
+        "cost": "עלות",
+        "sale": "מבצע",
+        "deal": "עסקה",
+        "discount": "הנחה",
+        "new": "חדש",
+        "latest": "חדש ביותר",
+        "upcoming": "עתיד",
+        "future": "עתיד",
+        "Samsung": "סמסונג",
+        "Apple": "אפל",
+        "Google": "גוגל",
+        "Microsoft": "מיקרוסופט",
+        "iPhone": "אייפון",
+        "iPad": "אייפד",
+        "Galaxy": "גלקסי",
+        "Tab": "טאב",
+        "Ultra": "אולטרה",
+        "Pro": "פרו",
+        "Max": "מקס",
+        "Plus": "פלוס"
+    }
+    
+    # תרגום מילות מפתח
+    hebrew_title = title
+    for eng, heb in translations.items():
+        # תרגום מילים שלמות בלבד (לא חלקי מילים)
+        import re
+        pattern = r'\b' + re.escape(eng) + r'\b'
+        hebrew_title = re.sub(pattern, heb, hebrew_title, flags=re.IGNORECASE)
+    
+    # אם הכותרת עדיין באנגלית לחלוטין, נוסיף תיאור עברי
+    if hebrew_title == title and all(ord(char) < 128 for char in title if char.isalpha()):
+        return f"מידע חדש: {title}"
+    
+    return hebrew_title
+
 def make_hebrew_list(results: List[Dict[str, str]]) -> str:
     """Create Hebrew-only consolidated message from results"""
     lines = []
@@ -533,6 +605,7 @@ def make_hebrew_list(results: List[Dict[str, str]]) -> str:
         url = (r.get("url") or "").strip()
         if not url:
             continue
+        # הכותרת כבר מתורגמת, פשוט נשתמש בה
         lines.append(f"• {title}\n🔗 {url}")
     return "\n\n".join(lines)
 
@@ -545,7 +618,7 @@ async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: 
         return
         
     items = make_hebrew_list(results)
-    msg = f"🔔 עדכון חדש עבור: {topic_text}\n\n👇 הנה התוצאות שמצאתי:\n\n{items}\n\n⏰ נבדק עכשיו (בדיקה חד-פעמית)"
+    msg = f"🔔 עדכון חדש עבור: {topic_text}\n\n👇 הנה התוצאות שמצאתי:\n\n{items}\n\n⏰ נבדק עכשיו"
     
     try:
         await bot.send_message(chat_id, msg, **_LP_KW)
@@ -577,8 +650,10 @@ def perform_search(query: str) -> list[dict]:
         
         formatted_results = []
         for result in search_results:
+            title = result.get('title', 'ללא כותרת')
+            hebrew_title = translate_title_to_hebrew(title)
             formatted_results.append({
-                'title': result.get('title', 'ללא כותרת'),
+                'title': hebrew_title,
                 'link': result.get('url', '#')
             })
             
@@ -986,61 +1061,25 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             # שליחת התוצאות למשתמש - רק תוצאות תקינות
             if valid_results:
-                message = f"🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
-                
-                for i, result in enumerate(valid_results[:5], 1):  # מגבלה של 5 תוצאות
-                    title = result.get('title', 'ללא כותרת')
-                    url = result.get('url', 'ללא קישור')
-                    summary = result.get('summary', 'ללא סיכום')
-                    
-                    message += f"**{i}. {title}**\n"
-                    message += f"🔗 {url}\n"
-                    message += f"📄 {summary}\n\n"
-            
-                if len(valid_results) > 5:
-                    message += f"📋 ועוד {len(valid_results) - 5} תוצאות נוספות...\n\n"
-                
-                message += f"⏰ נבדק עכשיו (בדיקה חד-פעמית)\n"
-                message += f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה"
-                
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message,
-                    parse_mode='Markdown',
-                    reply_markup=get_main_menu_keyboard(),
-                    **_LP_KW
-                )
-                
+                # שימוש בפונקציה המאוחדת לשליחת הודעה עברית אחת
+                await send_results_hebrew_only(context.bot, user_id, topic['topic'], valid_results)
                 logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(valid_results)} valid results out of {len(results)} total results")
             else:
                 # אם לא היו תוצאות תקינות, נתייחס לזה כמו שלא נמצאו תוצאות
                 logger.info(f"One-time check completed for topic {topic_id}, no valid results found (had {len(results)} invalid results)")
-                
-                # עדכון זמן הבדיקה האחרונה גם אם לא נמצאו תוצאות תקינות
-                db.update_topic_checked(topic_id)
-                
-                # שליחת הודעה שלא נמצאו תוצאות תקינות
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
-                         f"📭 לא נמצאו תוצאות תקינות כרגע\n"
-                         f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
-                    parse_mode='Markdown',
-                    **_LP_KW
-                )
         else:
             logger.info(f"One-time check completed for topic {topic_id}, no new results found")
-            
-            # עדכון זמן הבדיקה האחרונה גם אם לא נמצאו תוצאות
-            db.update_topic_checked(topic_id)
-            
-            # שליחת הודעה שלא נמצאו תוצאות
+        
+        # עדכון זמן הבדיקה האחרונה תמיד
+        db.update_topic_checked(topic_id)
+        
+        # שליחת הודעה אחת בלבד אם לא נמצאו תוצאות תקינות
+        if not (results and any(isinstance(result, dict) and is_valid_result(result) for result in results)):
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                text=f"🔍 בדיקה חד-פעמית הושלמה עבור: {topic['topic']}\n\n"
                      f"📭 לא נמצאו תוצאות חדשות כרגע\n"
                      f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
-                parse_mode='Markdown',
                 **_LP_KW
             )
         
