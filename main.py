@@ -57,7 +57,7 @@ PORT = int(os.getenv('PORT', 5000))
 
 # קבועים
 MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
-DEFAULT_PROVIDER = "tavily"
+DEFAULT_PROVIDER = "perplexity"
 
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -379,63 +379,9 @@ class WatchBotDB:
         conn.close()
         return True
 
-def _tavily_raw(query: str) -> dict:
-    """Raw HTTP call to Tavily API as fallback"""
-    url = "https://api.tavily.com/search"
-    payload = {
-        "api_key": API_KEY,
-        "query": query,
-        "search_depth": "advanced",
-        "include_answer": True,
-        "max_results": 5
-    }
-    r = requests.post(url, json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
 def log_search(provider: str, topic_id: int, query: str):
     """Log search with trimmed query"""
     logger.info("[SEARCH] provider=%s | topic_id=%s | query='%s'", provider, topic_id, query[:200])
-
-def tavily_search(query: str, **kwargs) -> Dict[str, Any]:
-    """Prevent TypeError: max_results passed twice by SDK + kwargs"""
-    max_results = kwargs.pop("max_results", 5)
-    try:
-        resp = client.search(
-            query=query,
-            include_answer=True,
-            max_results=max_results,
-            search_depth="advanced",
-            **kwargs
-        )
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[SDK] Tavily raw response: %s", resp)
-        if not resp or not resp.get("results"):
-            logger.warning("SDK empty. Trying RAW…")
-            raw = _tavily_raw(query)
-            if not raw or not raw.get("results"):
-                raise RuntimeError("Tavily empty both SDK & RAW")
-            logger.info("✅ Tavily fallback successful: %d results", len(raw.get('results', [])))
-            return raw
-        return resp
-    except Exception:
-        logger.exception("Tavily search failed – fallback RAW")
-        raw_result = _tavily_raw(query)
-        logger.info("✅ Tavily fallback successful: %d results", len(raw_result.get('results', [])))
-        return raw_result
-
-def normalize_tavily_links_only(resp: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Return only title+url with Hebrew translation, ignore english snippets/answer."""
-    out: List[Dict[str, str]] = []
-    for r in resp.get("results", [])[:5]:
-        title = (r.get("title") or "").strip()
-        url = r.get("url")
-        if not url:
-            continue
-        # תרגום הכותרת לעברית
-        hebrew_title = translate_title_to_hebrew(title)
-        out.append({"title": hebrew_title, "url": url})
-    return out
 
 def decrement_credits(user_id: int, used: int = 1) -> int:
     """Atomic-like function to decrement credits and return new value"""
@@ -470,23 +416,36 @@ def decrement_credits(user_id: int, used: int = 1) -> int:
     return max(MONTHLY_LIMIT - new_usage_count, 0)
 
 def run_topic_search(topic) -> List[Dict[str, str]]:
-    """Main search function that always calls Tavily - Hebrew only output"""
-    provider = "tavily"
+    """Main search function that uses Perplexity - Hebrew only output"""
+    provider = "perplexity"
     used = 1
     
     log_search(provider, topic.id, topic.query)
-    logger.info("🔍 Calling Tavily for topic: %s", topic.query)
+    logger.info("🔍 Calling Perplexity for topic: %s", topic.query)
     
     try:
-        tavily_res = tavily_search(topic.query, max_results=5)
+        perplexity_results = perform_search(topic.query)
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[SDK] Tavily raw response: %s", tavily_res)
-        results = normalize_tavily_links_only(tavily_res)
-        logger.info("✅ Tavily success: %d results", len(results))
+            logger.debug("[Perplexity] raw response: %s", perplexity_results)
         
+        # Convert Perplexity results to expected format
+        results = []
+        for result in perplexity_results:
+            title = result.get('title', 'ללא כותרת')
+            url = result.get('link', '')
+            
+            # תרגום הכותרת לעברית
+            hebrew_title = translate_title_to_hebrew(title)
+            
+            results.append({
+                'title': hebrew_title,
+                'url': url
+            })
+        
+        logger.info("✅ Perplexity success: %d results", len(results))
         return results
     except Exception as e:
-        logger.error("Tavily search failed for topic %s: %s", topic.id, e)
+        logger.error("Perplexity search failed for topic %s: %s", topic.id, e)
         raise
     finally:
         # Credits - decrement once per search
@@ -497,20 +456,19 @@ def run_topic_search(topic) -> List[Dict[str, str]]:
         except Exception as cred_err:
             logger.error("[CREDITS] failed to decrement: %s", cred_err)
 
-def normalize_tavily(tavily_res: dict) -> List[Dict]:
-    """Convert Tavily results to expected format - Hebrew only, ignore Tavily answer/content"""
-    results = tavily_res.get('results', [])
+def normalize_perplexity(perplexity_results: list) -> List[Dict]:
+    """Convert Perplexity results to expected format - Hebrew only"""
     formatted_results = []
     
-    for result in results:
-        # Build Hebrew message ourselves, ignore Tavily snippets/content entirely
+    for result in perplexity_results:
+        # Build Hebrew message ourselves
         title = result.get('title', 'ללא כותרת')
-        url = result.get('url', '')
+        url = result.get('link', '')
         
         # תרגום הכותרת לעברית
         hebrew_title = translate_title_to_hebrew(title)
         
-        # Create Hebrew summary instead of using Tavily content
+        # Create Hebrew summary
         summary = f"מקור מידע זמין בקישור - {hebrew_title[:100]}{'...' if len(hebrew_title) > 100 else ''}"
         
         formatted_results.append({
@@ -667,13 +625,13 @@ def perform_search(query: str) -> list[dict]:
         return []
 
 class SmartWatcher:
-    """מחלקה לניהול המעקב החכם עם Tavily API"""
+    """מחלקה לניהול המעקב החכם עם Perplexity API"""
     
     def __init__(self, db: WatchBotDB):
         self.db = db
     
     def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict[str, str]]:
-        """חיפוש ואנליזה של נושא עם Tavily API בלבד"""
+        """חיפוש ואנליזה של נושא עם Perplexity API בלבד"""
         # בדיקת מגבלת שימוש אם סופק user_id
         if user_id:
             usage_info = self.db.get_user_usage(user_id)
@@ -746,7 +704,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 אני עוזר לכם לעקוב אחרי נושאים שמעניינים אתכם ומתריע כשיש מידע חדש.
 
-🧠 אני משתמש ב-Tavily בינה מלאכותית עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
+🧠 אני משתמש ב-Perplexity בינה מלאכותית עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
 
 📊 **מגבלת השימוש החודשית:**
 🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
@@ -782,7 +740,7 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 נושא: {topic}\n"
         f"🆔 מזהה: {topic_id}\n"
         f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n"
-        f"🧠 אני אשתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש מידע עדכני\n\n"
+        f"🧠 אני אשתמש ב-Perplexity בינה מלאכותית עם גלישה לחיפוש מידע עדכני\n\n"
         f"אבדוק אותו כל 24 שעות ואתריע על תוכן חדש."
     )
 
@@ -883,7 +841,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם כל 24 שעות
-• משתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש באינטרנט
+• משתמש ב-Perplexity בינה מלאכותית עם גלישה לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שומר היסטוריה כדי למנוע כפילויות
 • שולח לכם רק תוכן חדש שלא ראיתם
@@ -895,7 +853,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • הבוט זוכר מה כבר נשלח אליכם
 
 🧠 **טכנולוגיה:**
-הבוט משתמש ב-Tavily בינה מלאכותית עם יכולות גלישה מתקדמות לחיפוש והערכה של מידע ברשת.
+הבוט משתמש ב-Perplexity בינה מלאכותית עם יכולות גלישה מתקדמות לחיפוש והערכה של מידע ברשת.
 """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -956,11 +914,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • סה"כ תוצאות: {total_results}
 • תוצאות היום: {results_today}
 
-📊 **שימוש Tavily החודש:**
+📊 **שימוש Perplexity החודש:**
 • סה"כ שאילתות: {total_usage_this_month}
 • ממוצע למשתמש: {total_usage_this_month/users_with_usage if users_with_usage > 0 else 0:.1f}
 
-🧠 משתמש ב-Tavily בינה מלאכותית עם גלישה
+🧠 משתמש ב-Perplexity בינה מלאכותית עם גלישה
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
@@ -1032,7 +990,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             return
         
-        # חיפוש תוצאות עם Tavily API
+                    # חיפוש תוצאות עם Perplexity API
         # Create topic object for the new run_topic_search function
         class TopicObj:
             def __init__(self, query, user_id, topic_id):
@@ -1145,7 +1103,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                 
                 continue
             
-            # חיפוש תוצאות עם Tavily API
+            # חיפוש תוצאות עם Perplexity API
             # Create topic object for the new run_topic_search function
             class TopicObj:
                 def __init__(self, query, user_id, topic_id):
@@ -1304,7 +1262,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆔 מזהה: {topic_id}\n"
                     f"⏰ תדירות בדיקה: {freq_text}\n"
                     f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n\n"
-                    f"🧠 אני אשתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש מידע עדכני",
+                    f"🧠 אני אשתמש ב-Perplexity בינה מלאכותית עם גלישה לחיפוש מידע עדכני",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
                 )
                 
@@ -1392,7 +1350,7 @@ async def show_usage_stats(query, user_id):
 
 📅 חודש נוכחי: {current_month}
 
-🔍 **שאילתות Tavily:**
+🔍 **שאילתות Perplexity:**
 {progress_bar} {percentage:.1f}%
 
 📈 השתמשת: {usage_info['current_usage']} / {usage_info['monthly_limit']}
@@ -1414,12 +1372,12 @@ async def show_help(query):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם לפי התדירות שבחרתם
-• משתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש באינטרנט
+• משתמש ב-Perplexity בינה מלאכותית עם גלישה לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שולח לכם רק תוכן חדש שלא ראיתם
 
 📊 **מגבלת שימוש:**
-• 200 בדיקות טאווילי לחודש לכל משתמש
+• 200 בדיקות Perplexity לחודש לכל משתמש
 • המגבלה מתאפסת בתחילת כל חודש
 • כל בדיקה (אוטומטית/ידנית) נספרת
 
@@ -1503,15 +1461,15 @@ def main():
     application.run_polling(drop_pending_updates=True)
 
 def run_smoke_test():
-    """Run smoke test for Tavily integration."""
+    """Run smoke test for Perplexity integration."""
     try:
-        logger.info("🔍 Running Tavily smoke test...")
+        logger.info("🔍 Running Perplexity smoke test...")
         
         # Test basic search
-        test = tavily_search("What is OpenAI?", max_results=3)
-        assert test and test.get("results"), "Smoke test failed: Tavily returned no results"
+        test = perform_search("What is OpenAI?")
+        assert test and len(test) > 0, "Smoke test failed: Perplexity returned no results"
         
-        logger.info(f"✅ Smoke test passed: Found {len(test.get('results', []))} results")
+        logger.info(f"✅ Smoke test passed: Found {len(test)} results")
         return True
         
     except Exception as e:
@@ -1520,8 +1478,8 @@ def run_smoke_test():
 
 # Smoke test (runs once at startup)
 if os.getenv("RUN_SMOKE_TEST", "true").lower() == "true":
-    test = tavily_search("What is OpenAI?", max_results=3)
-    assert test and test.get("results"), "Smoke test failed – empty"
+    test = perform_search("What is OpenAI?")
+    assert test and len(test) > 0, "Smoke test failed – empty"
     logger.info("Smoke test passed ✅")
 
 if __name__ == "__main__":
