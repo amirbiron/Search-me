@@ -1,3 +1,12 @@
+import os, subprocess
+VERSION = "2025-01-27-14:30"  # עדכן בכל דיפלוי
+print(f"[BOOT] VERSION={VERSION}")
+print(f"[BOOT] RENDER_GIT_COMMIT={os.getenv('RENDER_GIT_COMMIT')}")
+try:
+    print(f"[BOOT] HEAD_SHA={subprocess.getoutput('git rev-parse HEAD')[:8]}")
+except Exception:
+    pass
+
 import os
 import logging
 import threading
@@ -383,7 +392,7 @@ def _tavily_raw(query: str):
     return r.json()
 
 def tavily_search(query: str, **kwargs):
-    logger.info(f"Tavily query: {query} | kwargs={kwargs}")
+    logger.info(f"CALLING TAVILY | query={query} | kwargs={kwargs}")
     try:
         resp = client.search(
             query=query,
@@ -394,16 +403,15 @@ def tavily_search(query: str, **kwargs):
         )
         logger.debug(f"[SDK] Tavily raw response: {resp}")
         if not resp or not resp.get("results"):
-            logger.warning("SDK returned empty. Trying raw HTTP…")
+            logger.warning("SDK empty. Trying RAW…")
             raw = _tavily_raw(query)
             if not raw or not raw.get("results"):
-                raise RuntimeError("Tavily empty both SDK and raw")
+                raise RuntimeError("Tavily empty both SDK & RAW")
             return raw
         return resp
     except Exception:
-        logger.exception("Tavily search failed – falling back to raw")
-        raw = _tavily_raw(query)
-        return raw
+        logger.exception("Tavily search failed – fallback RAW")
+        return _tavily_raw(query)
 
 def perform_search(query: str) -> list[dict]:
     """
@@ -448,13 +456,14 @@ class SmartWatcher:
         self.db = db
     
     def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict]:
-        """חיפוש ואנליזה של נושא עם Perplexity API"""
+        """חיפוש ואנליזה של נושא עם Perplexity API ו-Tavily fallback"""
         # בדיקת מגבלת שימוש אם סופק user_id
         if user_id:
             usage_info = self.db.get_user_usage(user_id)
             if usage_info['remaining'] <= 0:
                 return []  # חריגה ממגבלת השימוש
-        
+
+        # נסה Perplexity תחילה
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
             
@@ -488,7 +497,7 @@ class SmartWatcher:
             
             # יצירת הבקשה ל-Perplexity API
             payload = {
-                "model": "sonar-medium-chat",
+                "model": "sonar-small-online",
                 "messages": [
                     {
                         "role": "system", 
@@ -501,6 +510,7 @@ class SmartWatcher:
                 "stream": False
             }
             
+            logger.info(f"🔍 Calling Perplexity API for topic: {topic}")
             response = requests.post(
                 PERPLEXITY_BASE_URL,
                 json=payload,
@@ -508,7 +518,14 @@ class SmartWatcher:
                 timeout=30
             )
             
-            response.raise_for_status()
+            logger.debug(f"🔍 Perplexity response status: {response.status_code}")
+            logger.debug(f"🔍 Perplexity response text: {response.text}")
+            
+            # אם קיבלנו 400 או שגיאה אחרת, עבור ל-Tavily
+            if response.status_code == 400 or not response.ok:
+                logger.warning(f"Perplexity failed with status {response.status_code}, falling back to Tavily")
+                return self._fallback_to_tavily(topic, user_id)
+            
             response_data = response.json()
             
             logger.info(f"🔍 Perplexity raw response for topic '{topic}': {response_data}")
@@ -520,8 +537,8 @@ class SmartWatcher:
             # ניסיון לפרס את ה-JSON
             response_text = response_data['choices'][0]['message']['content']
             if not response_text:
-                logger.warning(f"Empty response from Perplexity for topic '{topic}'")
-                return []
+                logger.warning(f"Empty response from Perplexity for topic '{topic}', falling back to Tavily")
+                return self._fallback_to_tavily(topic, user_id)
             
             response_text = response_text.strip()
             
@@ -578,22 +595,57 @@ class SmartWatcher:
                             valid_results.append(result)
                         else:
                             logger.warning(f"Skipping non-dict result: {result}")
-                    return valid_results
+                    
+                    if valid_results:
+                        return valid_results
+                    else:
+                        logger.warning(f"Perplexity returned empty valid results, falling back to Tavily")
+                        return self._fallback_to_tavily(topic, user_id)
                 else:
-                    logger.warning(f"Perplexity returned non-list result: {results}")
-                    return []
+                    logger.warning(f"Perplexity returned non-list result, falling back to Tavily")
+                    return self._fallback_to_tavily(topic, user_id)
             except json.JSONDecodeError as json_error:
-                logger.error(f"Failed to parse JSON response for topic '{topic}'. Error: {json_error}")
+                logger.error(f"Failed to parse JSON response for topic '{topic}'. Error: {json_error}, falling back to Tavily")
                 logger.debug(f"Raw response text: {response_text[:500]}...")  # רק 500 תווים ראשונים
-                return []
+                return self._fallback_to_tavily(topic, user_id)
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error in Perplexity API request for topic '{topic}': {e}")
-            return []
+            logger.error(f"Error in Perplexity API request for topic '{topic}': {e}, falling back to Tavily")
+            return self._fallback_to_tavily(topic, user_id)
         except Exception as e:
-            logger.error(f"Error in Perplexity search for topic '{topic}': {e}")
-            # במקרה של שגיאה, נחזיר רשימה ריקה כדי שהבוט ימשיך לפעול
-            return []
+            logger.error(f"Error in Perplexity search for topic '{topic}': {e}, falling back to Tavily")
+            return self._fallback_to_tavily(topic, user_id)
+
+    def _fallback_to_tavily(self, topic: str, user_id: int = None) -> List[Dict]:
+        """Fallback to Tavily when Perplexity fails"""
+        logger.info(f"🔄 Using Tavily fallback for topic: {topic}")
+        try:
+            tavily_response = tavily_search(topic, max_results=5)
+            results = tavily_response.get('results', [])
+            
+            if not results:
+                error_msg = f"Both Perplexity and Tavily failed for topic: '{topic}'"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            # המר תוצאות Tavily לפורמט הצפוי
+            formatted_results = []
+            for result in results:
+                formatted_results.append({
+                    'title': result.get('title', 'ללא כותרת'),
+                    'url': result.get('url', ''),
+                    'summary': result.get('content', 'ללא סיכום')[:200] + '...',
+                    'relevance_score': 8,
+                    'date_found': datetime.now().strftime("%Y-%m-%d")
+                })
+            
+            logger.info(f"✅ Tavily fallback successful: {len(formatted_results)} results")
+            return formatted_results
+            
+        except Exception as e:
+            error_msg = f"Both Perplexity and Tavily failed for topic '{topic}': {str(e)}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
 # יצירת אובייקטי המערכת
 db = WatchBotDB(DB_PATH)
