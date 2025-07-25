@@ -521,6 +521,10 @@ def normalize_tavily(tavily_res: dict) -> List[Dict]:
     
     return formatted_results
 
+def is_valid_result(r: dict) -> bool:
+    """Check if result has required title and url fields"""
+    return bool(r.get("title") and r.get("url"))
+
 def make_hebrew_list(results: List[Dict[str, str]]) -> str:
     """Create Hebrew-only consolidated message from results"""
     lines = []
@@ -532,7 +536,7 @@ def make_hebrew_list(results: List[Dict[str, str]]) -> str:
         lines.append(f"• {title}\n🔗 {url}")
     return "\n\n".join(lines)
 
-def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: List[Dict[str, str]]):
+async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: List[Dict[str, str]]):
     """
     Send ONE compact Hebrew message with all results,
     without English snippets and without Telegram link previews.
@@ -544,7 +548,7 @@ def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: List[D
     msg = f"🔔 עדכון חדש עבור: {topic_text}\n\n👇 הנה התוצאות שמצאתי:\n\n{items}\n\n⏰ נבדק עכשיו (בדיקה חד-פעמית)"
     
     try:
-        bot.send_message(chat_id, msg, **_LP_KW)
+        await bot.send_message(chat_id, msg, **_LP_KW)
         logger.info("Sent Hebrew-only consolidated message to user %s", chat_id)
     except Exception as e:
         logger.error("Failed to send Hebrew message to user %s: %s", chat_id, e)
@@ -969,9 +973,9 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             # שמירת התוצאות - עם בדיקת תקינות השדות
             valid_results = []
             for result in results:
-                if isinstance(result, dict) and all(key in result for key in ['title', 'url', 'summary']):
+                if isinstance(result, dict) and is_valid_result(result):
                     try:
-                        db.save_result(topic_id, result['title'], result['url'], result['summary'])
+                        db.save_result(topic_id, result['title'], result['url'], result.get('summary', ''))
                         valid_results.append(result)
                     except Exception as save_error:
                         logger.warning(f"Failed to save result for topic {topic_id}: {save_error}")
@@ -1125,7 +1129,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                 
                 # Send ONE consolidated Hebrew message for all new results
                 if new_results:
-                    send_results_hebrew_only(context.bot, topic['user_id'], topic['topic'], new_results)
+                    await send_results_hebrew_only(context.bot, topic['user_id'], topic['topic'], new_results)
                     logger.info("Sent %d new results for topic %d", len(new_results), topic['id'])
                 else:
                     logger.info("No new results for topic %d (all were duplicates)", topic['id'])
