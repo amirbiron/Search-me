@@ -400,6 +400,16 @@ def perform_search(query: str) -> list[dict]:
         )
         content = response.choices[0].message.content
         
+        # ================== קוד דיבאגינג קריטי ==================
+        # הקוד הבא ידפיס ללוגים את התשובה המדויקת מה-API
+        print("\n\n" + "="*25 + " RAW API RESPONSE " + "="*25)
+        print(f"QUERY SENT TO API: '{query}'")
+        print("-" * 70)
+        print("CONTENT RECEIVED FROM API:")
+        print(content)
+        print("=" * 70 + "\n\n")
+        # ========================================================
+        
         results = []
         matches = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
         
@@ -408,7 +418,7 @@ def perform_search(query: str) -> list[dict]:
             results.append({'title': title.strip(), 'link': link.strip()})
         
         if not results:
-             logger.warning(f"Could not parse any results for query: '{query}'. Raw content: {content}")
+             logger.warning(f"Could not parse any results from the model's response for query: '{query}'.")
 
         return results
 
