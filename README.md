@@ -124,6 +124,8 @@ watchbot/
 
 ## 🚀 שדרוגים עתידיים
 
+> הגרסה הנוכחית משתמשת ב-Tavily בלבד. אין צורך (ואין קוד) עבור Perplexity.
+
 ### 🎯 יתרונות הגישה החדשה (Tavily API בלבד)
 - **פשטות מקסימלית** - API אחד במקום שניים
 - **חיפוש מתמחה** - Tavily מתמחה בחיפושים באינטרנט ומספק תוצאות מדויקות
