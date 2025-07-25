@@ -41,7 +41,6 @@ logger.info(f"Tavily key prefix: {API_KEY[:4]}***")
 
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-PERPLEXITY_API_KEY = os.getenv('PERPLEXITY_API_KEY')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
@@ -51,18 +50,6 @@ MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
 
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-# בדיקת מפתח Perplexity API
-if not PERPLEXITY_API_KEY:
-    logger.error("PERPLEXITY_API_KEY environment variable is required")
-    exit(1)
-
-# הגדרות Perplexity API
-PERPLEXITY_BASE_URL = "https://api.perplexity.ai/chat/completions"
-PERPLEXITY_HEADERS = {
-    "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-    "Content-Type": "application/json"
-}
 
 class WatchBotDB:
     """מחלקה לניהול בסיס הנתונים"""
@@ -391,11 +378,14 @@ def _tavily_raw(query: str):
     r.raise_for_status()
     return r.json()
 
+def log_search(provider: str, topic_id: int, query: str):
+    """Log search with trimmed query"""
+    logger.info(f"[SEARCH] provider={provider} | topic_id={topic_id} | query='{query[:200]}'")
+
 def tavily_search(query: str, **kwargs):
-    logger.info(f"CALLING TAVILY | query={query} | kwargs={kwargs}")
+    # Pop max_results from kwargs before passing to SDK
+    max_results = kwargs.pop("max_results", 5)
     try:
-        # Extract max_results from kwargs to prevent duplicate parameter error
-        max_results = kwargs.pop("max_results", 10)
         resp = client.search(
             query=query,
             include_answer=True,
@@ -418,7 +408,78 @@ def tavily_search(query: str, **kwargs):
         logger.info(f"✅ Tavily fallback successful: {len(raw_result.get('results', []))} results")
         return raw_result
 
-# Removed decrement_credits function - credits are now handled directly in finally blocks
+def decrement_credits(user_id: int, used: int = 1) -> int:
+    """Atomic-like function to decrement credits and return new value"""
+    prev_usage = db.get_user_usage(user_id)
+    prev = prev_usage['remaining']
+    new_val = max(prev - used, 0)
+    
+    # Update the usage count
+    current_month = datetime.now().strftime("%Y-%m")
+    conn = sqlite3.connect(db.db_path)
+    cursor = conn.cursor()
+    
+    # Get current usage
+    cursor.execute('''
+        SELECT usage_count FROM usage_stats
+        WHERE user_id = ? AND month = ?
+    ''', (user_id, current_month))
+    
+    result = cursor.fetchone()
+    current_usage = result[0] if result else 0
+    
+    # Set new usage count
+    new_usage_count = min(current_usage + used, MONTHLY_LIMIT)
+    cursor.execute('''
+        INSERT OR REPLACE INTO usage_stats (user_id, month, usage_count)
+        VALUES (?, ?, ?)
+    ''', (user_id, current_month, new_usage_count))
+    
+    conn.commit()
+    conn.close()
+    
+    return max(MONTHLY_LIMIT - new_usage_count, 0)
+
+def run_topic_search(topic) -> List[Dict]:
+    """Main search function that always calls Tavily"""
+    provider = "tavily"
+    used = 1
+    
+    log_search(provider, topic.id, topic.query)
+    
+    try:
+        tavily_res = tavily_search(topic.query, max_results=5)
+        logger.debug(f"[SDK] Tavily raw response: {tavily_res}")
+        results = normalize_tavily(tavily_res)
+        logger.info(f"✅ Tavily success: {len(results)} results")
+        
+        return results
+    except Exception as e:
+        logger.error(f"Tavily search failed for topic {topic.id}: {e}")
+        raise
+    finally:
+        try:
+            prev = db.get_user_usage(topic.user_id)['remaining']
+            new_val = decrement_credits(topic.user_id, used)
+            logger.info(f"Credits decremented: -{used} | provider={provider} | {prev}->{new_val}")
+        except Exception as cred_e:
+            logger.error(f"[CREDITS] failed to decrement: {cred_e}")
+
+def normalize_tavily(tavily_res: dict) -> List[Dict]:
+    """Convert Tavily results to expected format"""
+    results = tavily_res.get('results', [])
+    formatted_results = []
+    
+    for result in results:
+        formatted_results.append({
+            'title': result.get('title', 'ללא כותרת'),
+            'url': result.get('url', ''),
+            'summary': result.get('content', 'ללא סיכום')[:200] + '...',
+            'relevance_score': 8,
+            'date_found': datetime.now().strftime("%Y-%m-%d")
+        })
+    
+    return formatted_results
 
 def perform_search(query: str) -> list[dict]:
     """
@@ -457,237 +518,28 @@ def perform_search(query: str) -> list[dict]:
         return []
 
 class SmartWatcher:
-    """מחלקה לניהול המעקב החכם עם Perplexity API"""
+    """מחלקה לניהול המעקב החכם עם Tavily API"""
     
     def __init__(self, db: WatchBotDB):
         self.db = db
     
     def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict]:
-        """חיפוש ואנליזה של נושא עם Perplexity API ו-Tavily fallback"""
+        """חיפוש ואנליזה של נושא עם Tavily API בלבד"""
         # בדיקת מגבלת שימוש אם סופק user_id
         if user_id:
             usage_info = self.db.get_user_usage(user_id)
             if usage_info['remaining'] <= 0:
                 return []  # חריגה ממגבלת השימוש
 
-        # Track credits usage
-        used = 1
-        provider = None
-        query = topic  # Store query for logging
+        # Create a simple topic object for compatibility
+        class TopicObj:
+            def __init__(self, query, user_id, topic_id):
+                self.query = query
+                self.user_id = user_id
+                self.id = topic_id or user_id  # Use user_id as fallback for topic_id
         
-        try:
-            # נסה Perplexity תחילה
-            provider = "perplexity"
-            logger.info(f"[SEARCH] provider={provider} | topic_id={user_id} | query='{query[:200]}'")
-            
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            
-            prompt = f"""
-אתה עוזר מעקב חכם. הנושא למעקב: "{topic}"
-התאריך הנוכחי: {current_date}
-
-משימתך:
-1. חפש באינטרנט מידע עדכני וחדש על הנושא הזה (חדשות, מאמרים, פוסטים וכו')
-2. התמקד בתוכן שפורסם בימים האחרונים או השבועות האחרונים
-3. מצא 2-5 מקורות רלוונטיים ואיכותיים
-4. לכל מקור, ספק את המידע הבא:
-   - כותרת ברורה ומתארת
-   - URL מלא ומדויק
-   - סיכום קצר של התוכן (2-3 משפטים)
-   - נימוק למה זה רלוונטי לנושא
-
-השב בפורמט JSON הבא:
-[
-  {{
-    "title": "כותרת המאמר/חדשה",
-    "url": "https://example.com/article",
-    "summary": "סיכום קצר של התוכן והרלוונטיות",
-    "relevance_score": 9,
-    "date_found": "2024-01-XX"
-  }}
-]
-
-חפש עכשיו ברשת מידע עדכני על: {topic}
-"""
-            
-            # יצירת הבקשה ל-Perplexity API
-            payload = {
-                "model": "sonar-medium-online",
-                "messages": [
-                    {
-                        "role": "system", 
-                        "content": "You are a smart web researcher with browsing capabilities. Always search the web for current information and return valid JSON format results. Answer in Hebrew when the user writes in Hebrew."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
-            
-            logger.info(f"🔍 Calling Perplexity API for topic: {topic}")
-            response = requests.post(
-                PERPLEXITY_BASE_URL,
-                json=payload,
-                headers=PERPLEXITY_HEADERS,
-                timeout=30
-            )
-            
-            logger.debug(f"[PPLX] status={response.status_code} body={response.text}")
-            
-            # אם קיבלנו 400 או שגיאה אחרת, עבור ל-Tavily
-            if response.status_code == 400 or not response.ok:
-                logger.warning(f"Perplexity failed with status {response.status_code}, falling back to Tavily")
-                raise ValueError("Perplexity failed, using fallback")
-            
-            response_data = response.json()
-            
-            logger.info(f"🔍 Perplexity raw response for topic '{topic}': {response_data}")
-            
-            # ניסיון לפרס את ה-JSON
-            response_text = response_data['choices'][0]['message']['content']
-            if not response_text:
-                logger.warning(f"Empty response from Perplexity for topic '{topic}', falling back to Tavily")
-                raise ValueError("Empty Perplexity response")
-            
-            response_text = response_text.strip()
-            
-            # ניקוי הטקסט מסימני markdown אם יש
-            if "```json" in response_text.lower():
-                parts = response_text.lower().split("```json")
-                if len(parts) > 1:
-                    end_parts = parts[1].split("```")
-                    if len(end_parts) > 0:
-                        # מצא את המיקום המקורי בטקסט
-                        start_idx = response_text.lower().find("```json") + 7
-                        end_idx = response_text.find("```", start_idx)
-                        if end_idx > start_idx:
-                            response_text = response_text[start_idx:end_idx].strip()
-            elif "```" in response_text:
-                parts = response_text.split("```")
-                if len(parts) >= 3:
-                    response_text = parts[1].strip()
-            
-            # הסרת תוכן שאינו JSON
-            if response_text.startswith('[') or response_text.startswith('{'):
-                # מצא את סוף ה-JSON
-                bracket_count = 0
-                json_end = 0
-                start_char = response_text[0]
-                end_char = ']' if start_char == '[' else '}'
-                
-                for i, char in enumerate(response_text):
-                    if char == start_char:
-                        bracket_count += 1
-                    elif char == end_char:
-                        bracket_count -= 1
-                        if bracket_count == 0:
-                            json_end = i + 1
-                            break
-                
-                if json_end > 0:
-                    response_text = response_text[:json_end]
-            
-            try:
-                results = json.loads(response_text)
-                if isinstance(results, list):
-                    # וידוא שכל התוצאות מכילות את השדות הנדרשים
-                    valid_results = []
-                    for result in results:
-                        if isinstance(result, dict):
-                            # וידוא שקיימים השדות הבסיסיים
-                            if 'title' not in result:
-                                result['title'] = 'ללא כותרת'
-                            if 'url' not in result:
-                                result['url'] = ''
-                            if 'summary' not in result:
-                                result['summary'] = 'ללא סיכום'
-                            valid_results.append(result)
-                        else:
-                            logger.warning(f"Skipping non-dict result: {result}")
-                    
-                    if valid_results:
-                        return valid_results
-                    else:
-                        logger.warning(f"Perplexity returned empty valid results, falling back to Tavily")
-                        raise ValueError("No valid Perplexity results")
-                else:
-                    logger.warning(f"Perplexity returned non-list result, falling back to Tavily")
-                    raise ValueError("Invalid Perplexity result format")
-            except json.JSONDecodeError as json_error:
-                logger.error(f"Failed to parse JSON response for topic '{topic}'. Error: {json_error}, falling back to Tavily")
-                logger.debug(f"Raw response text: {response_text[:500]}...")  # רק 500 תווים ראשונים
-                raise ValueError("JSON decode error")
-            
-        except Exception as e:
-            # Fallback to Tavily
-            logger.warning(f"Perplexity failed ({e}), falling back to Tavily")
-            provider = "tavily"
-            logger.info(f"[SEARCH] provider={provider} | topic_id={user_id} | query='{query[:200]}'")
-            
-            try:
-                tavily_response = tavily_search(topic, max_results=5)
-                results = tavily_response.get('results', [])
-                
-                if not results:
-                    error_msg = f"Both Perplexity and Tavily failed for topic: '{topic}'"
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                # המר תוצאות Tavily לפורמט הצפוי
-                formatted_results = []
-                for result in results:
-                    formatted_results.append({
-                        'title': result.get('title', 'ללא כותרת'),
-                        'url': result.get('url', ''),
-                        'summary': result.get('content', 'ללא סיכום')[:200] + '...',
-                        'relevance_score': 8,
-                        'date_found': datetime.now().strftime("%Y-%m-%d")
-                    })
-                
-                logger.info(f"✅ Tavily fallback successful: {len(formatted_results)} results")
-                return formatted_results
-                
-            except Exception as tavily_error:
-                error_msg = f"Both Perplexity and Tavily failed for topic '{topic}': {str(tavily_error)}"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-        finally:
-            # Always decrement credits regardless of success/failure
-            if user_id and provider:
-                prev = self.db.get_user_usage(user_id)
-                self.db.increment_usage(user_id)
-                new_usage = self.db.get_user_usage(user_id)
-                logger.info(f"Credits decremented: -{used} | provider={provider} | {prev['current_usage']}->{new_usage['current_usage']}")
-
-    def _fallback_to_tavily(self, topic: str, user_id: int = None) -> List[Dict]:
-        """Fallback to Tavily when Perplexity fails - DEPRECATED, use integrated flow"""
-        logger.info(f"🔄 Using Tavily fallback for topic: {topic}")
-        try:
-            tavily_response = tavily_search(topic, max_results=5)
-            results = tavily_response.get('results', [])
-            
-            if not results:
-                error_msg = f"Both Perplexity and Tavily failed for topic: '{topic}'"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            
-            # המר תוצאות Tavily לפורמט הצפוי
-            formatted_results = []
-            for result in results:
-                formatted_results.append({
-                    'title': result.get('title', 'ללא כותרת'),
-                    'url': result.get('url', ''),
-                    'summary': result.get('content', 'ללא סיכום')[:200] + '...',
-                    'relevance_score': 8,
-                    'date_found': datetime.now().strftime("%Y-%m-%d")
-                })
-            
-            logger.info(f"✅ Tavily fallback successful: {len(formatted_results)} results")
-            return formatted_results
-            
-        except Exception as e:
-            error_msg = f"Both Perplexity and Tavily failed for topic '{topic}': {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
+        topic_obj = TopicObj(topic, user_id, user_id)
+        return run_topic_search(topic_obj)
 
 # יצירת אובייקטי המערכת
 db = WatchBotDB(DB_PATH)
@@ -745,7 +597,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 אני עוזר לכם לעקוב אחרי נושאים שמעניינים אתכם ומתריע כשיש מידע חדש.
 
-🧠 אני משתמש ב-Perplexity AI עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
+🧠 אני משתמש ב-Tavily AI עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
 
 📊 **מגבלת השימוש החודשית:**
 🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
@@ -781,7 +633,7 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 נושא: {topic}\n"
         f"🆔 מזהה: {topic_id}\n"
         f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n"
-        f"🧠 אני אשתמש ב-Perplexity AI עם browsing לחיפוש מידע עדכני\n\n"
+        f"🧠 אני אשתמש ב-Tavily AI עם browsing לחיפוש מידע עדכני\n\n"
         f"אבדוק אותו כל 24 שעות ואתריע על תוכן חדש."
     )
 
@@ -882,7 +734,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם כל 24 שעות
-• משתמש ב-Perplexity AI עם browsing לחיפוש באינטרנט
+• משתמש ב-Tavily AI עם browsing לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שומר היסטוריה כדי למנוע כפילויות
 • שולח לכם רק תוכן חדש שלא ראיתם
@@ -894,7 +746,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • הבוט זוכר מה כבר נשלח אליכם
 
 🧠 **טכנולוגיה:**
-הבוט משתמש ב-Perplexity AI עם יכולות browsing מתקדמות לחיפוש והערכה של מידע ברשת.
+הבוט משתמש ב-Tavily AI עם יכולות browsing מתקדמות לחיפוש והערכה של מידע ברשת.
 """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -955,11 +807,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • סה"כ תוצאות: {total_results}
 • תוצאות היום: {results_today}
 
-📊 **שימוש Perplexity החודש:**
+📊 **שימוש Tavily החודש:**
 • סה"כ שאילתות: {total_usage_this_month}
 • ממוצע למשתמש: {total_usage_this_month/users_with_usage if users_with_usage > 0 else 0:.1f}
 
-🧠 משתמש ב-Perplexity AI עם browsing
+🧠 משתמש ב-Tavily AI עם browsing
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
@@ -1030,8 +882,16 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             return
         
-        # חיפוש תוצאות עם Perplexity API
-        results = smart_watcher.search_and_analyze_topic(topic['topic'], user_id)
+        # חיפוש תוצאות עם Tavily API
+        # Create topic object for the new run_topic_search function
+        class TopicObj:
+            def __init__(self, query, user_id, topic_id):
+                self.query = query
+                self.user_id = user_id
+                self.id = topic_id
+        
+        topic_obj = TopicObj(topic['topic'], user_id, topic_id)
+        results = run_topic_search(topic_obj)
         
         if results:
             # עדכון זמן הבדיקה האחרונה
@@ -1164,8 +1024,16 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                 
                 continue
             
-            # חיפוש תוצאות עם Perplexity API
-            results = smart_watcher.search_and_analyze_topic(topic['topic'], topic['user_id'])
+            # חיפוש תוצאות עם Tavily API
+            # Create topic object for the new run_topic_search function
+            class TopicObj:
+                def __init__(self, query, user_id, topic_id):
+                    self.query = query
+                    self.user_id = user_id
+                    self.id = topic_id
+            
+            topic_obj = TopicObj(topic['topic'], topic['user_id'], topic['id'])
+            results = run_topic_search(topic_obj)
             
             if results:
                 logger.info(f"Found {len(results)} results for topic {topic['id']}")
@@ -1387,7 +1255,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆔 מזהה: {topic_id}\n"
                     f"⏰ תדירות בדיקה: {freq_text}\n"
                     f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n\n"
-                    f"🧠 אני אשתמש ב-Perplexity AI עם browsing לחיפוש מידע עדכני",
+                    f"🧠 אני אשתמש ב-Tavily AI עם browsing לחיפוש מידע עדכני",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
                 )
                 
@@ -1475,7 +1343,7 @@ async def show_usage_stats(query, user_id):
 
 📅 חודש נוכחי: {current_month}
 
-🔍 **שאילתות Perplexity:**
+🔍 **שאילתות Tavily:**
 {progress_bar} {percentage:.1f}%
 
 📈 השתמשת: {usage_info['current_usage']} / {usage_info['monthly_limit']}
@@ -1497,12 +1365,12 @@ async def show_help(query):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם לפי התדירות שבחרתם
-• משתמש ב-Perplexity AI עם browsing לחיפוש באינטרנט
+• משתמש ב-Tavily AI עם browsing לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שולח לכם רק תוכן חדש שלא ראיתם
 
 📊 **מגבלת שימוש:**
-• 200 בדיקות Perplexity לחודש לכל משתמש
+• 200 בדיקות Tavily לחודש לכל משתמש
 • המגבלה מתאפסת בתחילת כל חודש
 • כל בדיקה (אוטומטית/ידנית) נספרת
 
