@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # --- הגדרות ה-API של Tavily ---
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-tavily_client = tavily(api_key=TAVILY_API_KEY)
+tavily_client = Tavily(api_key=TAVILY_API_KEY)
 
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
