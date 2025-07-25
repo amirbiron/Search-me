@@ -379,18 +379,16 @@ def perform_search(query: str) -> list[dict]:
         return []
 
     try:
-        # ביצוע החיפוש באמצעות הלקוח של Tavily
+        # שימוש במשתנה המתוקן: tavily_client
         response = tavily_client.search(query=query, search_depth="advanced", max_results=7)
         
-        # התוצאות נמצאות תחת המפתח 'results'
         search_results = response.get('results', [])
         
-        # המרת התוצאות לפורמט שהבוט מצפה לו
         formatted_results = []
         for result in search_results:
             formatted_results.append({
                 'title': result.get('title', 'No Title'),
-                'link': result.get('url', '#')  # שינוי שם המפתח מ-'url' ל-'link'
+                'link': result.get('url', '#')
             })
             
         return formatted_results
