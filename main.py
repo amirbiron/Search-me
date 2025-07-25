@@ -394,10 +394,12 @@ def _tavily_raw(query: str):
 def tavily_search(query: str, **kwargs):
     logger.info(f"CALLING TAVILY | query={query} | kwargs={kwargs}")
     try:
+        # Extract max_results from kwargs to prevent duplicate parameter error
+        max_results = kwargs.pop("max_results", 10)
         resp = client.search(
             query=query,
             include_answer=True,
-            max_results=10,
+            max_results=max_results,
             search_depth="advanced",
             **kwargs
         )
@@ -407,11 +409,33 @@ def tavily_search(query: str, **kwargs):
             raw = _tavily_raw(query)
             if not raw or not raw.get("results"):
                 raise RuntimeError("Tavily empty both SDK & RAW")
+            logger.info(f"✅ Tavily fallback successful: {len(raw.get('results', []))} results")
             return raw
         return resp
     except Exception:
         logger.exception("Tavily search failed – fallback RAW")
-        return _tavily_raw(query)
+        raw_result = _tavily_raw(query)
+        logger.info(f"✅ Tavily fallback successful: {len(raw_result.get('results', []))} results")
+        return raw_result
+
+def decrement_credits(user_id: int, amount: int, provider: str) -> bool:
+    """Centralized function to decrement user credits"""
+    if not user_id:
+        return True
+    
+    # Get current usage before decrement
+    db = WatchBotDB(DB_PATH)
+    usage_before = db.get_user_usage(user_id)
+    
+    # Perform the decrement
+    success = db.increment_usage(user_id)
+    
+    # Get usage after decrement for logging
+    usage_after = db.get_user_usage(user_id)
+    
+    logger.info(f"Credits decremented: -{amount} | provider={provider} | user={user_id} | before={usage_before['current_usage']} | after={usage_after['current_usage']}")
+    
+    return success
 
 def perform_search(query: str) -> list[dict]:
     """
@@ -463,8 +487,13 @@ class SmartWatcher:
             if usage_info['remaining'] <= 0:
                 return []  # חריגה ממגבלת השימוש
 
-        # נסה Perplexity תחילה
+        # Track credits usage
+        used = 1
+        provider = None
+        
         try:
+            # נסה Perplexity תחילה
+            provider = "perplexity"
             current_date = datetime.now().strftime("%Y-%m-%d")
             
             prompt = f"""
@@ -497,7 +526,7 @@ class SmartWatcher:
             
             # יצירת הבקשה ל-Perplexity API
             payload = {
-                "model": "sonar-small-online",
+                "model": "sonar-medium-online",
                 "messages": [
                     {
                         "role": "system", 
@@ -505,8 +534,6 @@ class SmartWatcher:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                "max_tokens": 2000,
-                "temperature": 0.3,
                 "stream": False
             }
             
@@ -524,21 +551,17 @@ class SmartWatcher:
             # אם קיבלנו 400 או שגיאה אחרת, עבור ל-Tavily
             if response.status_code == 400 or not response.ok:
                 logger.warning(f"Perplexity failed with status {response.status_code}, falling back to Tavily")
-                return self._fallback_to_tavily(topic, user_id)
+                raise ValueError("Perplexity failed, using fallback")
             
             response_data = response.json()
             
             logger.info(f"🔍 Perplexity raw response for topic '{topic}': {response_data}")
             
-            # עדכון המונה רק לאחר שאילתת Perplexity מוצלחת
-            if user_id:
-                self.db.increment_usage(user_id)
-            
             # ניסיון לפרס את ה-JSON
             response_text = response_data['choices'][0]['message']['content']
             if not response_text:
                 logger.warning(f"Empty response from Perplexity for topic '{topic}', falling back to Tavily")
-                return self._fallback_to_tavily(topic, user_id)
+                raise ValueError("Empty Perplexity response")
             
             response_text = response_text.strip()
             
@@ -600,24 +623,52 @@ class SmartWatcher:
                         return valid_results
                     else:
                         logger.warning(f"Perplexity returned empty valid results, falling back to Tavily")
-                        return self._fallback_to_tavily(topic, user_id)
+                        raise ValueError("No valid Perplexity results")
                 else:
                     logger.warning(f"Perplexity returned non-list result, falling back to Tavily")
-                    return self._fallback_to_tavily(topic, user_id)
+                    raise ValueError("Invalid Perplexity result format")
             except json.JSONDecodeError as json_error:
                 logger.error(f"Failed to parse JSON response for topic '{topic}'. Error: {json_error}, falling back to Tavily")
                 logger.debug(f"Raw response text: {response_text[:500]}...")  # רק 500 תווים ראשונים
-                return self._fallback_to_tavily(topic, user_id)
+                raise ValueError("JSON decode error")
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error in Perplexity API request for topic '{topic}': {e}, falling back to Tavily")
-            return self._fallback_to_tavily(topic, user_id)
         except Exception as e:
-            logger.error(f"Error in Perplexity search for topic '{topic}': {e}, falling back to Tavily")
-            return self._fallback_to_tavily(topic, user_id)
+            # Fallback to Tavily
+            logger.info(f"🔄 Using Tavily fallback for topic: {topic}")
+            provider = "tavily"
+            try:
+                tavily_response = tavily_search(topic, max_results=5)
+                results = tavily_response.get('results', [])
+                
+                if not results:
+                    error_msg = f"Both Perplexity and Tavily failed for topic: '{topic}'"
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+                
+                # המר תוצאות Tavily לפורמט הצפוי
+                formatted_results = []
+                for result in results:
+                    formatted_results.append({
+                        'title': result.get('title', 'ללא כותרת'),
+                        'url': result.get('url', ''),
+                        'summary': result.get('content', 'ללא סיכום')[:200] + '...',
+                        'relevance_score': 8,
+                        'date_found': datetime.now().strftime("%Y-%m-%d")
+                    })
+                
+                logger.info(f"✅ Tavily fallback successful: {len(formatted_results)} results")
+                return formatted_results
+                
+            except Exception as tavily_error:
+                error_msg = f"Both Perplexity and Tavily failed for topic '{topic}': {str(tavily_error)}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+        finally:
+            # Always decrement credits regardless of success/failure
+            decrement_credits(user_id, used, provider)
 
     def _fallback_to_tavily(self, topic: str, user_id: int = None) -> List[Dict]:
-        """Fallback to Tavily when Perplexity fails"""
+        """Fallback to Tavily when Perplexity fails - DEPRECATED, use integrated flow"""
         logger.info(f"🔄 Using Tavily fallback for topic: {topic}")
         try:
             tavily_response = tavily_search(topic, max_results=5)
@@ -1549,7 +1600,7 @@ def run_smoke_test():
         logger.info("🔍 Running Tavily smoke test...")
         
         # Test basic search
-        test = tavily_search("What is OpenAI?", include_images=False)
+        test = tavily_search("What is OpenAI?", max_results=3)
         assert test and test.get("results"), "Smoke test failed: Tavily returned no results"
         
         logger.info(f"✅ Smoke test passed: Found {len(test.get('results', []))} results")
@@ -1561,7 +1612,7 @@ def run_smoke_test():
 
 # Smoke test (runs once at startup)
 if os.getenv("RUN_SMOKE_TEST", "true").lower() == "true":
-    test = tavily_search("What is OpenAI?")
+    test = tavily_search("What is OpenAI?", max_results=3)
     assert test and test.get("results"), "Smoke test failed – empty results"
     logger.info("Smoke test passed ✅")
 
