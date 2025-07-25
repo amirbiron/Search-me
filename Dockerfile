@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # התקנת תלויות
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade tavily-python && pip install --no-cache-dir -r requirements.txt
 
 # העתקת קבצי הפרויקט
 COPY . .
