@@ -40,13 +40,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# הפחתת רעש מספריות רועשות
-logging.getLogger("httpcore").setLevel(logging.INFO)
-logging.getLogger("httpx").setLevel(logging.INFO)
-logging.getLogger("urllib3").setLevel(logging.INFO)
-logging.getLogger("apscheduler").setLevel(logging.INFO)
-logging.getLogger("werkzeug").setLevel(logging.INFO)
-logging.getLogger("telegram").setLevel(logging.INFO)
+# הפחתת רעש מספריות רועשות - quieter logs
+for noisy in ("httpcore", "httpx", "urllib3", "apscheduler", "werkzeug", "telegram"):
+    logging.getLogger(noisy).setLevel(logging.INFO)
 
 # --- הגדרות ה-API של Tavily ---
 API_KEY = os.getenv("TAVILY_API_KEY")
@@ -64,6 +60,7 @@ PORT = int(os.getenv('PORT', 5000))
 
 # קבועים
 MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
+DEFAULT_PROVIDER = "tavily"
 
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -385,22 +382,26 @@ class WatchBotDB:
         conn.close()
         return True
 
-def _tavily_raw(query: str):
+def _tavily_raw(query: str) -> dict:
+    """Raw HTTP call to Tavily API as fallback"""
     url = "https://api.tavily.com/search"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
-    payload = {"query": query, "include_answer": True, "max_results": 5}
-    r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
-    logger.debug(f"[RAW] Tavily status: {r.status_code}")
-    logger.debug(f"[RAW] Tavily body: {r.text}")
+    payload = {
+        "api_key": API_KEY,
+        "query": query,
+        "search_depth": "advanced",
+        "include_answer": True,
+        "max_results": 5
+    }
+    r = requests.post(url, json=payload, timeout=30)
     r.raise_for_status()
     return r.json()
 
 def log_search(provider: str, topic_id: int, query: str):
     """Log search with trimmed query"""
-    logger.info(f"[SEARCH] provider={provider} | topic_id={topic_id} | query='{query[:200]}'")
+    logger.info("[SEARCH] provider=%s | topic_id=%s | query='%s'", provider, topic_id, query[:200])
 
-def tavily_search(query: str, **kwargs):
-    # Pop max_results from kwargs before passing to SDK to avoid duplicate argument
+def tavily_search(query: str, **kwargs) -> Dict[str, Any]:
+    """Prevent TypeError: max_results passed twice by SDK + kwargs"""
     max_results = kwargs.pop("max_results", 5)
     try:
         resp = client.search(
@@ -410,20 +411,32 @@ def tavily_search(query: str, **kwargs):
             search_depth="advanced",
             **kwargs
         )
-        logger.debug(f"[SDK] Tavily raw response: {resp}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[SDK] Tavily raw response: %s", resp)
         if not resp or not resp.get("results"):
             logger.warning("SDK empty. Trying RAW…")
             raw = _tavily_raw(query)
             if not raw or not raw.get("results"):
                 raise RuntimeError("Tavily empty both SDK & RAW")
-            logger.info(f"✅ Tavily fallback successful: {len(raw.get('results', []))} results")
+            logger.info("✅ Tavily fallback successful: %d results", len(raw.get('results', [])))
             return raw
         return resp
     except Exception:
         logger.exception("Tavily search failed – fallback RAW")
         raw_result = _tavily_raw(query)
-        logger.info(f"✅ Tavily fallback successful: {len(raw_result.get('results', []))} results")
+        logger.info("✅ Tavily fallback successful: %d results", len(raw_result.get('results', [])))
         return raw_result
+
+def normalize_tavily_links_only(resp: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Return only title+url, ignore english snippets/answer."""
+    out: List[Dict[str, str]] = []
+    for r in resp.get("results", [])[:5]:
+        title = (r.get("title") or "").strip()
+        url = r.get("url")
+        if not url:
+            continue
+        out.append({"title": title, "url": url})
+    return out
 
 def decrement_credits(user_id: int, used: int = 1) -> int:
     """Atomic-like function to decrement credits and return new value"""
@@ -457,30 +470,33 @@ def decrement_credits(user_id: int, used: int = 1) -> int:
     
     return max(MONTHLY_LIMIT - new_usage_count, 0)
 
-def run_topic_search(topic) -> List[Dict]:
-    """Main search function that always calls Tavily"""
+def run_topic_search(topic) -> List[Dict[str, str]]:
+    """Main search function that always calls Tavily - Hebrew only output"""
     provider = "tavily"
     used = 1
     
     log_search(provider, topic.id, topic.query)
+    logger.info("🔍 Calling Tavily for topic: %s", topic.query)
     
     try:
         tavily_res = tavily_search(topic.query, max_results=5)
-        logger.debug(f"[SDK] Tavily raw response: {tavily_res}")
-        results = normalize_tavily(tavily_res)
-        logger.info(f"✅ Tavily success: {len(results)} results")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[SDK] Tavily raw response: %s", tavily_res)
+        results = normalize_tavily_links_only(tavily_res)
+        logger.info("✅ Tavily success: %d results", len(results))
         
         return results
     except Exception as e:
-        logger.error(f"Tavily search failed for topic {topic.id}: {e}")
+        logger.error("Tavily search failed for topic %s: %s", topic.id, e)
         raise
     finally:
+        # Credits - decrement once per search
         try:
             prev = db.get_user_usage(topic.user_id)['remaining']
             new_val = decrement_credits(topic.user_id, used)
-            logger.info(f"Credits decremented: -{used} | provider={provider} | {prev}->{new_val}")
-        except Exception as cred_e:
-            logger.error(f"[CREDITS] failed to decrement: {cred_e}")
+            logger.info("Credits decremented: -%d | provider=%s | %d->%d", used, provider, prev, new_val)
+        except Exception as cred_err:
+            logger.error("[CREDITS] failed to decrement: %s", cred_err)
 
 def normalize_tavily(tavily_res: dict) -> List[Dict]:
     """Convert Tavily results to expected format - Hebrew only, ignore Tavily answer/content"""
@@ -504,6 +520,34 @@ def normalize_tavily(tavily_res: dict) -> List[Dict]:
         })
     
     return formatted_results
+
+def make_hebrew_list(results: List[Dict[str, str]]) -> str:
+    """Create Hebrew-only consolidated message from results"""
+    lines = []
+    for r in results:
+        title = (r.get("title") or "").strip()
+        url = (r.get("url") or "").strip()
+        if not url:
+            continue
+        lines.append(f"• {title}\n🔗 {url}")
+    return "\n\n".join(lines)
+
+def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: List[Dict[str, str]]):
+    """
+    Send ONE compact Hebrew message with all results,
+    without English snippets and without Telegram link previews.
+    """
+    if not results:
+        return
+        
+    items = make_hebrew_list(results)
+    msg = f"🔔 עדכון חדש עבור: {topic_text}\n\n👇 הנה התוצאות שמצאתי:\n\n{items}\n\n⏰ נבדק עכשיו (בדיקה חד-פעמית)"
+    
+    try:
+        bot.send_message(chat_id, msg, **_LP_KW)
+        logger.info("Sent Hebrew-only consolidated message to user %s", chat_id)
+    except Exception as e:
+        logger.error("Failed to send Hebrew message to user %s: %s", chat_id, e)
 
 def perform_search(query: str) -> list[dict]:
     """
@@ -547,7 +591,7 @@ class SmartWatcher:
     def __init__(self, db: WatchBotDB):
         self.db = db
     
-    def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict]:
+    def search_and_analyze_topic(self, topic: str, user_id: int = None) -> List[Dict[str, str]]:
         """חיפוש ואנליזה של נושא עם Tavily API בלבד"""
         # בדיקת מגבלת שימוש אם סופק user_id
         if user_id:
@@ -1063,50 +1107,30 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
             results = run_topic_search(topic_obj)
             
             if results:
-                logger.info(f"Found {len(results)} results for topic {topic['id']}")
+                logger.info("Found %d results for topic %d", len(results), topic['id'])
                 
-                # שמירת תוצאות חדשות ושליחה
-                new_results_count = 0
+                # שמירת תוצאות חדשות ושליחה - Hebrew consolidated message
+                new_results = []
                 
                 for result in results[:3]:  # מקסימום 3 תוצאות
                     result_id = db.save_result(
                         topic['id'],
                         result.get('title', 'ללא כותרת'),
                         result.get('url', ''),
-                        result.get('summary', 'ללא סיכום')
+                        result.get('title', 'ללא סיכום')  # Use title as summary since we ignore English content
                     )
                     
                     if result_id:  # תוצאה חדשה
-                        new_results_count += 1
-                        
-                        # שליחת התראה למשתמש - הודעה בעברית בלבד
-                        message = f"""🔔 **עדכון חדש עבור: {topic['topic']}**
-
-📰 {result.get('title', 'ללא כותרת')}
-
-📝 {result.get('summary', 'ללא סיכום')}
-
-🔗 [קישור למקור]({result.get('url', '')})
-
-🎯 רלוונטיות: {result.get('relevance_score', 'N/A')}/10"""
-                        
-                        try:
-                            await context.bot.send_message(
-                                chat_id=topic['user_id'],
-                                text=message,
-                                parse_mode='Markdown',
-                                **_LP_KW
-                            )
-                            logger.info(f"Sent notification to user {topic['user_id']} for topic {topic['id']}")
-                        except Exception as e:
-                            logger.error(f"Failed to send message to user {topic['user_id']}: {e}")
+                        new_results.append(result)
                 
-                if new_results_count > 0:
-                    logger.info(f"Sent {new_results_count} new results for topic {topic['id']}")
+                # Send ONE consolidated Hebrew message for all new results
+                if new_results:
+                    send_results_hebrew_only(context.bot, topic['user_id'], topic['topic'], new_results)
+                    logger.info("Sent %d new results for topic %d", len(new_results), topic['id'])
                 else:
-                    logger.info(f"No new results for topic {topic['id']} (all were duplicates)")
+                    logger.info("No new results for topic %d (all were duplicates)", topic['id'])
             else:
-                logger.info(f"No results found for topic {topic['id']}")
+                logger.info("No results found for topic %d", topic['id'])
             
             # עדכון זמן הבדיקה
             db.update_topic_checked(topic['id'])
@@ -1115,15 +1139,15 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(2)
             
         except Exception as e:
-            logger.error(f"Error checking topic {topic['id']} ('{topic.get('topic', 'unknown')}'): {e}")
+            logger.error("Error checking topic %d ('%s'): %s", topic['id'], topic.get('topic', 'unknown'), e)
             
             # עדכון זמן הבדיקה גם במקרה של שגיאה כדי למנוע לולאת שגיאות
             try:
                 db.update_topic_checked(topic['id'])
             except Exception as db_error:
-                logger.error(f"Failed to update topic check time after error for topic {topic['id']}: {db_error}")
+                logger.error("Failed to update topic check time after error for topic %d: %s", topic['id'], db_error)
     
-    logger.info(f"Finished checking {len(topics)} topics")
+    logger.info("Finished checking %d topics", len(topics))
 
 async def check_for_updates(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Checks for new search results for all users and notifies them."""
@@ -1161,22 +1185,23 @@ async def check_for_updates(context: ContextTypes.DEFAULT_TYPE) -> None:
                 db.update_results_for_term(user_id, search_term, current_results)
         
         if all_new_results_for_user:
+            # Hebrew-only consolidated message for all updates
             message = "📢 מצאתי עדכונים חדשים עבורך!\n\n"
             for item in all_new_results_for_user:
-                message += f"<b>נושא החיפוש: {item['term']}</b>\n"
+                message += f"🔔 נושא החיפוש: {item['term']}\n\n"
                 for res in item['results']:
-                    message += f"- <a href='{res['link']}'>{res['title']}</a>\n"
+                    message += f"• {res['title']}\n🔗 {res['link']}\n\n"
                 message += "\n"
             
             try:
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=message,
-                    parse_mode=ParseMode.HTML,
                     **_LP_KW
                 )
+                logger.info("Sent Hebrew-only consolidated updates to user %s", user_id)
             except Exception as e:
-                logger.error(f"Failed to send message to user {user_id}: {e}")
+                logger.error("Failed to send message to user %s: %s", user_id, e)
 
 # משתנים גלובליים לניהול מצבים
 user_states = {}
