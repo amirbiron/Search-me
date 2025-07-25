@@ -6,9 +6,12 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import asyncio
+import re
+from openai import OpenAI
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.constants import ParseMode
 from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import requests
@@ -19,6 +22,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# --- הגדרות ה-API של Perplexity ---
+API_KEY = os.getenv("PERPLEXITY_API_KEY")
+client = OpenAI(api_key=API_KEY, base_url="https://api.perplexity.ai")
 
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -361,6 +368,53 @@ class WatchBotDB:
         conn.commit()
         conn.close()
         return True
+
+def perform_search(query: str) -> list[dict]:
+    """
+    Performs a search using the Perplexity API.
+    Returns a list of dictionaries, each containing 'title' and 'link'.
+    """
+    if not API_KEY:
+        logger.error("PERPLEXITY_API_KEY environment variable is not set or empty.")
+        return []
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert AI search assistant. You MUST respond with ONLY a markdown-formatted list of the top 5-7 web search results for the user's query. "
+                "Do not add any introductory text, conversation, or summaries. Your entire response must be only the list. "
+                "Each line must strictly follow the format: - [Result Title](URL)"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Search query: {query}",
+        },
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model="pplx-7b-online",
+            messages=messages,
+        )
+        content = response.choices[0].message.content
+        
+        results = []
+        matches = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
+        
+        for match in matches:
+            title, link = match
+            results.append({'title': title.strip(), 'link': link.strip()})
+        
+        if not results:
+             logger.warning(f"Could not parse any results for query: '{query}'. Raw content: {content}")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"An error occurred while calling the Perplexity API: {e}")
+        return []
 
 class SmartWatcher:
     """מחלקה לניהול המעקב החכם עם Perplexity API"""
@@ -1058,6 +1112,59 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Failed to update topic check time after error for topic {topic['id']}: {db_error}")
     
     logger.info(f"Finished checking {len(topics)} topics")
+
+async def check_for_updates(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Checks for new search results for all users and notifies them."""
+    logger.info("Running scheduled job: Checking for updates...")
+    users = db.get_all_users()
+
+    for user_doc in users:
+        user_id = user_doc['user_id']
+        all_new_results_for_user = []
+
+        if 'search_terms' not in user_doc or not user_doc['search_terms']:
+            continue
+
+        for search_term_data in user_doc['search_terms']:
+            search_term = search_term_data['term']
+            keywords = search_term_data.get('keywords', [])
+            
+            logger.info(f"Searching for term: '{search_term}' for user: {user_id}")
+            current_results = perform_search(search_term)
+            
+            if keywords:
+                current_results = [
+                    res for res in current_results 
+                    if any(keyword.lower() in res['title'].lower() for keyword in keywords)
+                ]
+
+            previous_results = db.get_results_for_term(user_id, search_term)
+            new_results = [res for res in current_results if res not in previous_results]
+
+            if new_results:
+                all_new_results_for_user.append({
+                    'term': search_term,
+                    'results': new_results
+                })
+                db.update_results_for_term(user_id, search_term, current_results)
+        
+        if all_new_results_for_user:
+            message = "📢 מצאתי עדכונים חדשים עבורך!\n\n"
+            for item in all_new_results_for_user:
+                message += f"<b>נושא החיפוש: {item['term']}</b>\n"
+                for res in item['results']:
+                    message += f"- <a href='{res['link']}'>{res['title']}</a>\n"
+                message += "\n"
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to send message to user {user_id}: {e}")
 
 # משתנים גלובליים לניהול מצבים
 user_states = {}
