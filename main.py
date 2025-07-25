@@ -44,13 +44,9 @@ logger = logging.getLogger(__name__)
 for noisy in ("httpcore", "httpx", "urllib3", "apscheduler", "werkzeug", "telegram"):
     logging.getLogger(noisy).setLevel(logging.INFO)
 
-# --- הגדרות ה-API של Tavily ---
-API_KEY = os.getenv("TAVILY_API_KEY")
-assert API_KEY and API_KEY.strip(), "TAVILY_API_KEY missing/empty"
-
-from tavily import TavilyClient
-client = TavilyClient(api_key=API_KEY)
-logger.info(f"Tavily key prefix: {API_KEY[:4]}***")
+# --- הגדרות ה-API של Perplexity ---
+API_KEY = os.getenv("PERPLEXITY_API_KEY")
+client = OpenAI(api_key=API_KEY, base_url="https://api.perplexity.ai")
 
 # משתני סביבה
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -628,40 +624,45 @@ async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: 
 
 def perform_search(query: str) -> list[dict]:
     """
-    Performs a search using the Tavily API with fallback for empty results.
-    Returns a list of dictionaries, each containing 'title' and 'link'.
+    Performs a search using the Perplexity API with the 'sonar-pro' model.
     """
+    if not API_KEY:
+        logger.error("PERPLEXITY_API_KEY environment variable is not set or empty.")
+        return []
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert AI search assistant. You MUST respond with ONLY a markdown-formatted list of the top 5-7 web search results for the user's query. "
+                "Do not add any introductory text, conversation, or summaries. Your entire response must be only the list. "
+                "Each line must strictly follow the format: - [Result Title](URL)"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Search query: {query}",
+        },
+    ]
+
     try:
-        # First attempt
-        response = tavily_search(query, max_results=7)
-        search_results = response.get('results', [])
+        response = client.chat.completions.create(
+            model="sonar-pro",
+            messages=messages,
+        )
+        content = response.choices[0].message.content
         
-        # If empty, try with different parameters
-        if not search_results:
-            logger.warning(f"First Tavily search returned empty results for query: {query}")
-            response = tavily_search(query, max_results=10, search_depth="basic")
-            search_results = response.get('results', [])
-            
-            # If still empty, raise clear error
-            if not search_results:
-                error_msg = f"Tavily returned no results after 2 attempts for query: '{query}'"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
+        results = []
+        matches = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
         
-        formatted_results = []
-        for result in search_results:
-            title = result.get('title', 'ללא כותרת')
-            hebrew_title = translate_title_to_hebrew(title)
-            formatted_results.append({
-                'title': hebrew_title,
-                'link': result.get('url', '#')
-            })
-            
-        logger.info(f"Successfully retrieved {len(formatted_results)} search results")
-        return formatted_results
+        for match in matches:
+            title, link = match
+            results.append({'title': title.strip(), 'link': link.strip()})
+        
+        return results
 
     except Exception as e:
-        logger.error(f"An error occurred during Tavily API call: {e}")
+        logger.error(f"An error occurred while calling the Perplexity API: {e}")
         return []
 
 class SmartWatcher:
