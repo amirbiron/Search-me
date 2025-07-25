@@ -386,7 +386,7 @@ def _tavily_raw(query: str):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
     payload = {"query": query, "include_answer": True, "max_results": 5}
     r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
-    logger.info(f"[RAW] Tavily status: {r.status_code}")
+    logger.debug(f"[RAW] Tavily status: {r.status_code}")
     logger.debug(f"[RAW] Tavily body: {r.text}")
     r.raise_for_status()
     return r.json()
@@ -418,24 +418,7 @@ def tavily_search(query: str, **kwargs):
         logger.info(f"✅ Tavily fallback successful: {len(raw_result.get('results', []))} results")
         return raw_result
 
-def decrement_credits(user_id: int, amount: int, provider: str) -> bool:
-    """Centralized function to decrement user credits"""
-    if not user_id:
-        return True
-    
-    # Get current usage before decrement
-    db = WatchBotDB(DB_PATH)
-    usage_before = db.get_user_usage(user_id)
-    
-    # Perform the decrement
-    success = db.increment_usage(user_id)
-    
-    # Get usage after decrement for logging
-    usage_after = db.get_user_usage(user_id)
-    
-    logger.info(f"Credits decremented: -{amount} | provider={provider} | user={user_id} | before={usage_before['current_usage']} | after={usage_after['current_usage']}")
-    
-    return success
+# Removed decrement_credits function - credits are now handled directly in finally blocks
 
 def perform_search(query: str) -> list[dict]:
     """
@@ -490,10 +473,13 @@ class SmartWatcher:
         # Track credits usage
         used = 1
         provider = None
+        query = topic  # Store query for logging
         
         try:
             # נסה Perplexity תחילה
             provider = "perplexity"
+            logger.info(f"[SEARCH] provider={provider} | topic_id={user_id} | query='{query[:200]}'")
+            
             current_date = datetime.now().strftime("%Y-%m-%d")
             
             prompt = f"""
@@ -545,8 +531,7 @@ class SmartWatcher:
                 timeout=30
             )
             
-            logger.debug(f"🔍 Perplexity response status: {response.status_code}")
-            logger.debug(f"🔍 Perplexity response text: {response.text}")
+            logger.debug(f"[PPLX] status={response.status_code} body={response.text}")
             
             # אם קיבלנו 400 או שגיאה אחרת, עבור ל-Tavily
             if response.status_code == 400 or not response.ok:
@@ -634,8 +619,10 @@ class SmartWatcher:
             
         except Exception as e:
             # Fallback to Tavily
-            logger.info(f"🔄 Using Tavily fallback for topic: {topic}")
+            logger.warning(f"Perplexity failed ({e}), falling back to Tavily")
             provider = "tavily"
+            logger.info(f"[SEARCH] provider={provider} | topic_id={user_id} | query='{query[:200]}'")
+            
             try:
                 tavily_response = tavily_search(topic, max_results=5)
                 results = tavily_response.get('results', [])
@@ -665,7 +652,11 @@ class SmartWatcher:
                 raise RuntimeError(error_msg)
         finally:
             # Always decrement credits regardless of success/failure
-            decrement_credits(user_id, used, provider)
+            if user_id and provider:
+                prev = self.db.get_user_usage(user_id)
+                self.db.increment_usage(user_id)
+                new_usage = self.db.get_user_usage(user_id)
+                logger.info(f"Credits decremented: -{used} | provider={provider} | {prev['current_usage']}->{new_usage['current_usage']}")
 
     def _fallback_to_tavily(self, topic: str, user_id: int = None) -> List[Dict]:
         """Fallback to Tavily when Perplexity fails - DEPRECATED, use integrated flow"""
@@ -1613,7 +1604,7 @@ def run_smoke_test():
 # Smoke test (runs once at startup)
 if os.getenv("RUN_SMOKE_TEST", "true").lower() == "true":
     test = tavily_search("What is OpenAI?", max_results=3)
-    assert test and test.get("results"), "Smoke test failed – empty results"
+    assert test and test.get("results"), "Smoke test failed – empty"
     logger.info("Smoke test passed ✅")
 
 if __name__ == "__main__":
