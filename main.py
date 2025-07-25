@@ -395,7 +395,7 @@ def perform_search(query: str) -> list[dict]:
 
     try:
         response = client.chat.completions.create(
-            model="pplx-7b-online",
+            model="pplx-70b-online",
             messages=messages,
         )
         content = response.choices[0].message.content
