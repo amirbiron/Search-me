@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import asyncio
 import re
-from tavily.client import TavilyClient
+from tavily import TavilyClient
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
