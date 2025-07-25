@@ -18,11 +18,20 @@ import asyncio
 import re
 import requests
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# Future-proof LinkPreviewOptions handling for PTB compatibility
+try:
+    # PTB >=21
+    from telegram import LinkPreviewOptions  # type: ignore
+    _LP_KW = {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
+except Exception:
+    # PTB 20.x fallback
+    _LP_KW = {"disable_web_page_preview": True}
 
 # הגדרת לוגינג
 logging.basicConfig(
@@ -890,7 +899,8 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                     text=f"📊 הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\n"
                          f"הבדיקה החד-פעמית לנושא החדש לא בוצעה.\n\n"
                          f"🔍 להצגת פרטי השימוש: /start ← 📊 שימוש נוכחי",
-                    reply_markup=get_main_menu_keyboard()
+                    reply_markup=get_main_menu_keyboard(),
+                    **_LP_KW
                 )
             except Exception as e:
                 logger.error(f"Failed to send limit notification to user {user_id}: {e}")
@@ -949,8 +959,8 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                     chat_id=user_id,
                     text=message,
                     parse_mode='Markdown',
-                    link_preview_options=LinkPreviewOptions(is_disabled=True),
-                    reply_markup=get_main_menu_keyboard()
+                    reply_markup=get_main_menu_keyboard(),
+                    **_LP_KW
                 )
                 
                 logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(valid_results)} valid results out of {len(results)} total results")
@@ -968,8 +978,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                          f"📭 לא נמצאו תוצאות תקינות כרגע\n"
                          f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                     parse_mode='Markdown',
-                    link_preview_options=LinkPreviewOptions(is_disabled=True),
-                    reply_markup=get_main_menu_keyboard()
+                    **_LP_KW
                 )
         else:
             logger.info(f"One-time check completed for topic {topic_id}, no new results found")
@@ -984,8 +993,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                      f"📭 לא נמצאו תוצאות חדשות כרגע\n"
                      f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                 parse_mode='Markdown',
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-                reply_markup=get_main_menu_keyboard()
+                **_LP_KW
             )
         
     except Exception as e:
@@ -1005,7 +1013,8 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=user_id,
                 text=f"❌ אירעה שגיאה בבדיקה החד-פעמית של הנושא: {topic_name}\n"
                      f"הבדיקות הקבועות יפעלו כרגיל.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(),
+                **_LP_KW
             )
         except Exception as send_error:
             logger.error(f"Failed to send error notification to user {user_id}: {send_error}")
@@ -1034,7 +1043,8 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                         text=f"📊 הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\n"
                              f"המעקב יתחדש אוטומטיות בתחילת החודש הבא.\n\n"
                              f"🔍 להצגת פרטי השימוש: /start ← 📊 שימוש נוכחי",
-                        reply_markup=get_main_menu_keyboard()
+                        reply_markup=get_main_menu_keyboard(),
+                        **_LP_KW
                     )
                 except Exception as e:
                     logger.error(f"Failed to send limit notification to user {topic['user_id']}: {e}")
@@ -1085,7 +1095,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                                 chat_id=topic['user_id'],
                                 text=message,
                                 parse_mode='Markdown',
-                                link_preview_options=LinkPreviewOptions(is_disabled=True)
+                                **_LP_KW
                             )
                             logger.info(f"Sent notification to user {topic['user_id']} for topic {topic['id']}")
                         except Exception as e:
@@ -1163,7 +1173,7 @@ async def check_for_updates(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=user_id,
                     text=message,
                     parse_mode=ParseMode.HTML,
-                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    **_LP_KW
                 )
             except Exception as e:
                 logger.error(f"Failed to send message to user {user_id}: {e}")
