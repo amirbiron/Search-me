@@ -2,4 +2,4 @@ python-telegram-bot[job-queue]==20.7
 requests==2.31.0
 flask==3.0.0
 apscheduler==3.10.4
-tavily-python>=0.1.9
+tavily-python>=0.5.0
