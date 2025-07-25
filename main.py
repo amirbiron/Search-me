@@ -18,7 +18,7 @@ import asyncio
 import re
 import requests
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from flask import Flask, jsonify
@@ -30,6 +30,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# הפחתת רעש מספריות רועשות
+logging.getLogger("httpcore").setLevel(logging.INFO)
+logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.INFO)
+logging.getLogger("apscheduler").setLevel(logging.INFO)
+logging.getLogger("werkzeug").setLevel(logging.INFO)
+logging.getLogger("telegram").setLevel(logging.INFO)
 
 # --- הגדרות ה-API של Tavily ---
 API_KEY = os.getenv("TAVILY_API_KEY")
@@ -383,7 +391,7 @@ def log_search(provider: str, topic_id: int, query: str):
     logger.info(f"[SEARCH] provider={provider} | topic_id={topic_id} | query='{query[:200]}'")
 
 def tavily_search(query: str, **kwargs):
-    # Pop max_results from kwargs before passing to SDK
+    # Pop max_results from kwargs before passing to SDK to avoid duplicate argument
     max_results = kwargs.pop("max_results", 5)
     try:
         resp = client.search(
@@ -466,15 +474,22 @@ def run_topic_search(topic) -> List[Dict]:
             logger.error(f"[CREDITS] failed to decrement: {cred_e}")
 
 def normalize_tavily(tavily_res: dict) -> List[Dict]:
-    """Convert Tavily results to expected format"""
+    """Convert Tavily results to expected format - Hebrew only, ignore Tavily answer/content"""
     results = tavily_res.get('results', [])
     formatted_results = []
     
     for result in results:
+        # Build Hebrew message ourselves, ignore Tavily snippets/content entirely
+        title = result.get('title', 'ללא כותרת')
+        url = result.get('url', '')
+        
+        # Create Hebrew summary instead of using Tavily content
+        summary = f"מקור מידע זמין בקישור - {title[:100]}{'...' if len(title) > 100 else ''}"
+        
         formatted_results.append({
-            'title': result.get('title', 'ללא כותרת'),
-            'url': result.get('url', ''),
-            'summary': result.get('content', 'ללא סיכום')[:200] + '...',
+            'title': title,
+            'url': url,
+            'summary': summary,
             'relevance_score': 8,
             'date_found': datetime.now().strftime("%Y-%m-%d")
         })
@@ -833,13 +848,13 @@ async def test_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         results = smart_watcher.search_and_analyze_topic(topic)
         
         if results:
-            message = f"👇 הנה הכלים שמצאתי:\n\n✅ נמצאו {len(results)} תוצאות עבור '{topic}':\n\n"
+            message = f"✅ נמצאו {len(results)} תוצאות עבור '{topic}':\n\n"
             for i, result in enumerate(results[:3], 1):
                 message += f"{i}. **{result.get('title', 'ללא כותרת')}**\n"
                 message += f"🔗 {result.get('url', 'ללא קישור')}\n"
                 message += f"📝 {result.get('summary', 'ללא סיכום')}\n\n"
         else:
-            message = f"👇 הנה הכלים שמצאתי:\n\n❌ לא נמצאו תוצאות עבור '{topic}'"
+            message = f"❌ לא נמצאו תוצאות עבור '{topic}'"
         
         await update.message.reply_text(message, parse_mode='Markdown')
         
@@ -913,7 +928,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             
             # שליחת התוצאות למשתמש - רק תוצאות תקינות
             if valid_results:
-                message = f"👇 הנה הכלים שמצאתי:\n\n🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
+                message = f"🔍 **בדיקה חד-פעמית - תוצאות חדשות עבור:** {topic['topic']}\n\n"
                 
                 for i, result in enumerate(valid_results[:5], 1):  # מגבלה של 5 תוצאות
                     title = result.get('title', 'ללא כותרת')
@@ -934,7 +949,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                     chat_id=user_id,
                     text=message,
                     parse_mode='Markdown',
-                    disable_web_page_preview=True,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
                     reply_markup=get_main_menu_keyboard()
                 )
                 
@@ -949,10 +964,11 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                 # שליחת הודעה שלא נמצאו תוצאות תקינות
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"👇 הנה הכלים שמצאתי:\n\n🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                    text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
                          f"📭 לא נמצאו תוצאות תקינות כרגע\n"
                          f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                     parse_mode='Markdown',
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
                     reply_markup=get_main_menu_keyboard()
                 )
         else:
@@ -964,10 +980,11 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             # שליחת הודעה שלא נמצאו תוצאות
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"👇 הנה הכלים שמצאתי:\n\n🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
+                text=f"🔍 **בדיקה חד-פעמית הושלמה עבור:** {topic['topic']}\n\n"
                      f"📭 לא נמצאו תוצאות חדשות כרגע\n"
                      f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                 parse_mode='Markdown',
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
                 reply_markup=get_main_menu_keyboard()
             )
         
@@ -1052,9 +1069,8 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                     if result_id:  # תוצאה חדשה
                         new_results_count += 1
                         
-                        # שליחת התראה למשתמש
-                        message = f"""
-🔔 **עדכון חדש עבור: {topic['topic']}**
+                        # שליחת התראה למשתמש - הודעה בעברית בלבד
+                        message = f"""🔔 **עדכון חדש עבור: {topic['topic']}**
 
 📰 {result.get('title', 'ללא כותרת')}
 
@@ -1062,15 +1078,14 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
 
 🔗 [קישור למקור]({result.get('url', '')})
 
-🎯 רלוונטיות: {result.get('relevance_score', 'N/A')}/10
-"""
+🎯 רלוונטיות: {result.get('relevance_score', 'N/A')}/10"""
                         
                         try:
                             await context.bot.send_message(
                                 chat_id=topic['user_id'],
                                 text=message,
                                 parse_mode='Markdown',
-                                disable_web_page_preview=False
+                                link_preview_options=LinkPreviewOptions(is_disabled=True)
                             )
                             logger.info(f"Sent notification to user {topic['user_id']} for topic {topic['id']}")
                         except Exception as e:
@@ -1148,7 +1163,7 @@ async def check_for_updates(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=user_id,
                     text=message,
                     parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
             except Exception as e:
                 logger.error(f"Failed to send message to user {user_id}: {e}")
