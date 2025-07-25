@@ -1,3 +1,4 @@
+from openai import OpenAI
 import os, subprocess
 VERSION = "2025-01-27-14:30"  # עדכן בכל דיפלוי
 print(f"[BOOT] VERSION={VERSION}")
