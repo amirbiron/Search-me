@@ -594,8 +594,8 @@ def perform_search(query: str) -> list[dict]:
             "role": "system",
             "content": (
                 "You are an expert AI search assistant. You MUST respond with ONLY a markdown-formatted list of the top 5-7 web search results for the user's query. "
-                "Do not add any introductory text, conversation, or summaries. Your entire response must be only the list. "
-                "Each line must strictly follow the format: - [Result Title](URL)"
+                "Each line must strictly follow the format: - [Result Title](URL). "
+                "CRITICAL: All URLs in the list must be full, absolute URLs that start with 'https://'." #  <--  ההנחיה החדשה
             ),
         },
         {
