@@ -744,7 +744,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 אני עוזר לכם לעקוב אחרי נושאים שמעניינים אתכם ומתריע כשיש מידע חדש.
 
-🧠 אני משתמש ב-Tavily AI עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
+🧠 אני משתמש ב-Tavily בינה מלאכותית עם יכולות גלישה באינטרנט לחיפוש מידע עדכני ורלוונטי.
 
 📊 **מגבלת השימוש החודשית:**
 🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
@@ -758,7 +758,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הוספת נושא למעקב"""
     if not context.args:
-        await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch Galaxy Tab S11 Ultra")
+        await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch גלקסי טאב S11 אולטרה")
         return
     
     topic = ' '.join(context.args)
@@ -780,7 +780,7 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 נושא: {topic}\n"
         f"🆔 מזהה: {topic_id}\n"
         f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n"
-        f"🧠 אני אשתמש ב-Tavily AI עם browsing לחיפוש מידע עדכני\n\n"
+        f"🧠 אני אשתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש מידע עדכני\n\n"
         f"אבדוק אותו כל 24 שעות ואתריע על תוכן חדש."
     )
 
@@ -832,7 +832,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הסרת נושא"""
     if not context.args:
-        await update.message.reply_text("❌ אנא ציינו נושא או מזהה להסרה.\nדוגמה: /remove 1 או /remove Galaxy Tab S11 Ultra")
+        await update.message.reply_text("❌ אנא ציינו נושא או מזהה להסרה.\nדוגמה: /remove 1 או /remove גלקסי טאב S11 אולטרה")
         return
     
     identifier = ' '.join(context.args)
@@ -864,7 +864,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📌 **הוספת נושא למעקב:**
 /watch <נושא>
-דוגמה: /watch טכנולוגיות AI חדשות
+דוגמה: /watch טכנולוגיות בינה מלאכותית חדשות
 
 📋 **צפייה ברשימת הנושאים:**
 /list
@@ -881,19 +881,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם כל 24 שעות
-• משתמש ב-Tavily AI עם browsing לחיפוש באינטרנט
+• משתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שומר היסטוריה כדי למנוע כפילויות
 • שולח לכם רק תוכן חדש שלא ראיתם
 
 💡 **טיפים:**
 • השתמשו בנושאים ספציפיים לתוצאות טובות יותר
-• הוסיפו שנה או מילות מפתח נוספות (למשל: "AI 2024")
+• הוסיפו שנה או מילות מפתח נוספות (למשל: "בינה מלאכותית 2024")
 • ניתן לעקוב אחרי מספר נושאים במקביל
 • הבוט זוכר מה כבר נשלח אליכם
 
 🧠 **טכנולוגיה:**
-הבוט משתמש ב-Tavily AI עם יכולות browsing מתקדמות לחיפוש והערכה של מידע ברשת.
+הבוט משתמש ב-Tavily בינה מלאכותית עם יכולות גלישה מתקדמות לחיפוש והערכה של מידע ברשת.
 """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -958,7 +958,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • סה"כ שאילתות: {total_usage_this_month}
 • ממוצע למשתמש: {total_usage_this_month/users_with_usage if users_with_usage > 0 else 0:.1f}
 
-🧠 משתמש ב-Tavily AI עם browsing
+🧠 משתמש ב-Tavily בינה מלאכותית עם גלישה
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
@@ -1065,16 +1065,17 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                 await send_results_hebrew_only(context.bot, user_id, topic['topic'], valid_results)
                 logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(valid_results)} valid results out of {len(results)} total results")
             else:
-                # אם לא היו תוצאות תקינות, נתייחס לזה כמו שלא נמצאו תוצאות
+                # אם לא היו תוצאות תקינות, שלח הודעה על כך
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🔍 בדיקה חד-פעמית הושלמה עבור: {topic['topic']}\n\n"
+                         f"📭 לא נמצאו תוצאות חדשות כרגע\n"
+                         f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
+                    **_LP_KW
+                )
                 logger.info(f"One-time check completed for topic {topic_id}, no valid results found (had {len(results)} invalid results)")
         else:
-            logger.info(f"One-time check completed for topic {topic_id}, no new results found")
-        
-        # עדכון זמן הבדיקה האחרונה תמיד
-        db.update_topic_checked(topic_id)
-        
-        # שליחת הודעה אחת בלבד אם לא נמצאו תוצאות תקינות
-        if not (results and any(isinstance(result, dict) and is_valid_result(result) for result in results)):
+            # אם לא נמצאו תוצאות כלל
             await context.bot.send_message(
                 chat_id=user_id,
                 text=f"🔍 בדיקה חד-פעמית הושלמה עבור: {topic['topic']}\n\n"
@@ -1082,6 +1083,10 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                      f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                 **_LP_KW
             )
+            logger.info(f"One-time check completed for topic {topic_id}, no new results found")
+        
+        # עדכון זמן הבדיקה האחרונה תמיד
+        db.update_topic_checked(topic_id)
         
     except Exception as e:
         logger.error(f"Error in one-time topic check for topic {topic_id}: {e}")
@@ -1192,59 +1197,8 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("Finished checking %d topics", len(topics))
 
-async def check_for_updates(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Checks for new search results for all users and notifies them."""
-    logger.info("Running scheduled job: Checking for updates...")
-    users = db.get_all_users()
-
-    for user_doc in users:
-        user_id = user_doc['user_id']
-        all_new_results_for_user = []
-
-        if 'search_terms' not in user_doc or not user_doc['search_terms']:
-            continue
-
-        for search_term_data in user_doc['search_terms']:
-            search_term = search_term_data['term']
-            keywords = search_term_data.get('keywords', [])
-            
-            logger.info(f"Searching for term: '{search_term}' for user: {user_id}")
-            current_results = perform_search(search_term)
-            
-            if keywords:
-                current_results = [
-                    res for res in current_results 
-                    if any(keyword.lower() in res['title'].lower() for keyword in keywords)
-                ]
-
-            previous_results = db.get_results_for_term(user_id, search_term)
-            new_results = [res for res in current_results if res not in previous_results]
-
-            if new_results:
-                all_new_results_for_user.append({
-                    'term': search_term,
-                    'results': new_results
-                })
-                db.update_results_for_term(user_id, search_term, current_results)
-        
-        if all_new_results_for_user:
-            # Hebrew-only consolidated message for all updates
-            message = "📢 מצאתי עדכונים חדשים עבורך!\n\n"
-            for item in all_new_results_for_user:
-                message += f"🔔 נושא החיפוש: {item['term']}\n\n"
-                for res in item['results']:
-                    message += f"• {res['title']}\n🔗 {res['link']}\n\n"
-                message += "\n"
-            
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message,
-                    **_LP_KW
-                )
-                logger.info("Sent Hebrew-only consolidated updates to user %s", user_id)
-            except Exception as e:
-                logger.error("Failed to send message to user %s: %s", user_id, e)
+# הפונקציה הזו הוסרה כי היא לא נחוצה ועלולה לגרום לשליחת הודעות כפולות
+# הבוט משתמש בפונקציה check_topics_job במקום
 
 # משתנים גלובליים לניהול מצבים
 user_states = {}
@@ -1348,7 +1302,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🆔 מזהה: {topic_id}\n"
                     f"⏰ תדירות בדיקה: {freq_text}\n"
                     f"🔍 בדיקה חד-פעמית תתבצע בעוד דקה\n\n"
-                    f"🧠 אני אשתמש ב-Tavily AI עם browsing לחיפוש מידע עדכני",
+                    f"🧠 אני אשתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש מידע עדכני",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
                 )
                 
@@ -1458,12 +1412,12 @@ async def show_help(query):
 
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם לפי התדירות שבחרתם
-• משתמש ב-Tavily AI עם browsing לחיפוש באינטרנט
+• משתמש ב-Tavily בינה מלאכותית עם גלישה לחיפוש באינטרנט
 • מוצא מידע עדכני ורלוונטי בלבד
 • שולח לכם רק תוכן חדש שלא ראיתם
 
 📊 **מגבלת שימוש:**
-• 200 בדיקות Tavily לחודש לכל משתמש
+• 200 בדיקות טאווילי לחודש לכל משתמש
 • המגבלה מתאפסת בתחילת כל חודש
 • כל בדיקה (אוטומטית/ידנית) נספרת
 
