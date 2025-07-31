@@ -1692,7 +1692,20 @@ async def show_recent_users(query):
 לא נמצאו משתמשים שהיו פעילים בשבוע האחרון.
 """
         else:
-            message = "👥 **משתמשים אחרונים (שבוע אחרון)**\n\n"
+            total_weekly_users = len(recent_users)
+            total_topics_added = sum(user['topics_added'] for user in recent_users)
+            total_monthly_usage = sum(user['usage_count'] for user in recent_users)
+            
+            message = f"""👥 **משתמשים אחרונים (שבוע אחרון)**
+
+📊 **סיכום כללי:**
+• 👤 סה"כ משתמשים פעילים השבוע: **{total_weekly_users}**
+• 📝 סה"כ נושאים נוספו השבוע: **{total_topics_added}**
+• 🔍 סה"כ שימוש החודש: **{total_monthly_usage}**
+
+📋 **פירוט משתמשים:**
+
+"""
             
             for i, user in enumerate(recent_users[:10], 1):  # מגביל ל-10 משתמשים
                 username = user['username']
@@ -1705,12 +1718,14 @@ async def show_recent_users(query):
                 if activity_dates:
                     last_activity = max(activity_dates)
                     activity_text = f"📅 פעילות אחרונה: {last_activity}"
+                    activity_days = len(set(activity_dates))
+                    activity_text += f" ({activity_days} ימי פעילות)"
                 else:
                     activity_text = "📅 ללא פעילות השבוע"
                 
                 message += f"""
 {i}. **{username}** (ID: {user_id})
-   📝 נושאים נוספו: {topics_added}
+   📝 נושאים השבוע: {topics_added}
    🔍 שימוש החודש: {usage_count}
    {activity_text}
 """
