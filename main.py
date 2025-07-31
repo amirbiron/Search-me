@@ -60,6 +60,7 @@ PORT = int(os.getenv('PORT', 5000))
 # MongoDB configuration
 MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
 MONGODB_DB_NAME = os.getenv('MONGODB_DB_NAME', 'watchbot')
+USE_MONGODB = os.getenv('USE_MONGODB', 'false').lower() == 'true'
 
 # לוג משתני סביבה חשובים
 logger.info(f"Environment variables loaded - ADMIN_ID: {ADMIN_ID}, BOT_TOKEN: {'SET' if BOT_TOKEN else 'NOT SET'}")
@@ -754,6 +755,204 @@ def perform_search(query: str) -> list[dict]:
         logger.error(f"An error occurred while calling the Perplexity API: {e}")
         return []
 
+
+class WatchBotMongoDB:
+    """מחלקה לניהול בסיס נתונים MongoDB"""
+    
+    def __init__(self, uri: str, db_name: str):
+        self.client = MongoClient(uri)
+        self.db = self.client[db_name]
+        self.users_collection = self.db.users
+        self.watch_topics_collection = self.db.watch_topics
+        self.usage_stats_collection = self.db.usage_stats
+        self.found_results_collection = self.db.found_results
+        
+        # יצירת אינדקסים
+        self._create_indexes()
+    
+    def _create_indexes(self):
+        """יצירת אינדקסים לביצועים טובים יותר"""
+        try:
+            # אינדקס על user_id
+            self.users_collection.create_index("user_id", unique=True)
+            self.watch_topics_collection.create_index("user_id")
+            self.usage_stats_collection.create_index([("user_id", 1), ("month", 1)], unique=True)
+            
+            # אינדקס על תאריכים
+            self.watch_topics_collection.create_index("created_at")
+            self.users_collection.create_index("created_at")
+            
+            logger.info("MongoDB indexes created successfully")
+        except Exception as e:
+            logger.error(f"Error creating MongoDB indexes: {e}")
+    
+    def get_recent_users_activity(self) -> List[Dict[str, Any]]:
+        """קבלת רשימת משתמשים שהשתמשו השבוע - גרסת MongoDB"""
+        try:
+            # תאריך לפני שבוע
+            week_ago = datetime.now() - timedelta(days=7)
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            # Pipeline לאיחוד נתונים מכמה קולקשנים
+            pipeline = [
+                {
+                    "$lookup": {
+                        "from": "watch_topics",
+                        "localField": "user_id",
+                        "foreignField": "user_id",
+                        "as": "topics"
+                    }
+                },
+                {
+                    "$lookup": {
+                        "from": "usage_stats",
+                        "let": {"user_id": "$user_id"},
+                        "pipeline": [
+                            {
+                                "$match": {
+                                    "$expr": {
+                                        "$and": [
+                                            {"$eq": ["$user_id", "$$user_id"]},
+                                            {"$eq": ["$month", current_month]}
+                                        ]
+                                    }
+                                }
+                            }
+                        ],
+                        "as": "usage"
+                    }
+                },
+                {
+                    "$addFields": {
+                        "recent_topics": {
+                            "$filter": {
+                                "input": "$topics",
+                                "cond": {"$gte": ["$$this.created_at", week_ago]}
+                            }
+                        },
+                        "usage_count": {
+                            "$ifNull": [{"$arrayElemAt": ["$usage.usage_count", 0]}, 0]
+                        }
+                    }
+                },
+                {
+                    "$match": {
+                        "$or": [
+                            {"recent_topics": {"$ne": []}},  # יש נושאים מהשבוע
+                            {"created_at": {"$gte": week_ago}},  # נרשם השבוע
+                            {"usage_count": {"$gt": 0}}  # השתמש החודש
+                        ]
+                    }
+                },
+                {
+                    "$project": {
+                        "user_id": 1,
+                        "username": 1,
+                        "created_at": 1,
+                        "topics_added": {"$size": "$recent_topics"},
+                        "usage_count": 1,
+                        "activity_dates": {
+                            "$map": {
+                                "input": "$recent_topics",
+                                "as": "topic",
+                                "in": {
+                                    "$dateToString": {
+                                        "format": "%Y-%m-%d",
+                                        "date": "$$topic.created_at"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    "$addFields": {
+                        "activity_dates": {
+                            "$cond": {
+                                "if": {"$gte": ["$created_at", week_ago]},
+                                "then": {
+                                    "$setUnion": [
+                                        "$activity_dates",
+                                        [{
+                                            "$dateToString": {
+                                                "format": "%Y-%m-%d",
+                                                "date": "$created_at"
+                                            }
+                                        }]
+                                    ]
+                                },
+                                "else": "$activity_dates"
+                            }
+                        }
+                    }
+                },
+                {
+                    "$sort": {"created_at": -1}
+                }
+            ]
+            
+            results = list(self.users_collection.aggregate(pipeline))
+            
+            # עיבוד התוצאות לפורמט הנדרש
+            users_activity = []
+            for user in results:
+                users_activity.append({
+                    'user_id': user['user_id'],
+                    'username': user.get('username', f"User_{user['user_id']}"),
+                    'topics_added': user.get('topics_added', 0),
+                    'usage_count': user.get('usage_count', 0),
+                    'activity_dates': list(set(user.get('activity_dates', [])))  # הסרת כפילויות
+                })
+            
+            logger.info(f"Found {len(users_activity)} recent users")
+            return users_activity
+            
+        except Exception as e:
+            logger.error(f"Error getting recent users activity from MongoDB: {e}")
+            return []
+    
+    def add_user(self, user_id: int, username: str = None):
+        """הוספת משתמש חדש"""
+        try:
+            user_doc = {
+                "user_id": user_id,
+                "username": username,
+                "is_active": True,
+                "created_at": datetime.now()
+            }
+            
+            self.users_collection.update_one(
+                {"user_id": user_id},
+                {"$setOnInsert": user_doc},
+                upsert=True
+            )
+            logger.info(f"User {user_id} added/updated in MongoDB")
+            
+        except Exception as e:
+            logger.error(f"Error adding user to MongoDB: {e}")
+    
+    def add_watch_topic(self, user_id: int, topic: str, check_interval: int = 24, checks_remaining: int = None) -> int:
+        """הוספת נושא למעקב"""
+        try:
+            topic_doc = {
+                "user_id": user_id,
+                "topic": topic,
+                "check_interval": check_interval,
+                "is_active": True,
+                "created_at": datetime.now(),
+                "last_checked": None,
+                "checks_remaining": checks_remaining
+            }
+            
+            result = self.watch_topics_collection.insert_one(topic_doc)
+            logger.info(f"Topic added to MongoDB with ID: {result.inserted_id}")
+            return str(result.inserted_id)
+            
+        except Exception as e:
+            logger.error(f"Error adding watch topic to MongoDB: {e}")
+            return None
+
+
 class SmartWatcher:
     """מחלקה לניהול המעקב החכם עם Perplexity API"""
     
@@ -779,7 +978,13 @@ class SmartWatcher:
         return run_topic_search(topic_obj)
 
 # יצירת אובייקטי המערכת
-db = WatchBotDB(DB_PATH)
+if USE_MONGODB:
+    logger.info("Using MongoDB database")
+    db = WatchBotMongoDB(MONGODB_URI, MONGODB_DB_NAME)
+else:
+    logger.info("Using SQLite database")
+    db = WatchBotDB(DB_PATH)
+
 smart_watcher = SmartWatcher(db)
 
 # שרת Flask ל-Keep-Alive

@@ -17,6 +17,12 @@ services:
         sync: false
       - key: DB_PATH
         value: /var/data/watchbot.db
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: watchbot
+      - key: USE_MONGODB
+        value: false
     disk:
       name: watchbot-data
       mountPath: /var/data
