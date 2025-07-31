@@ -555,6 +555,10 @@ class WatchBotDB:
         conn.commit()
         conn.close()
         return True
+    
+    def check_user_usage(self, user_id: int) -> bool:
+        """בדיקה אם המשתמש יכול לבצע חיפוש נוסף - גרסת SQLite"""
+        return self.increment_usage(user_id)
 
 def log_search(provider: str, topic_id: int, query: str):
     """Log search with trimmed query"""
@@ -566,31 +570,54 @@ def decrement_credits(user_id: int, used: int = 1) -> int:
     prev = prev_usage['remaining']
     new_val = max(prev - used, 0)
     
-    # Update the usage count
-    current_month = datetime.now().strftime("%Y-%m")
-    conn = sqlite3.connect(db.db_path)
-    cursor = conn.cursor()
-    
-    # Get current usage
-    cursor.execute('''
-        SELECT usage_count FROM usage_stats
-        WHERE user_id = ? AND month = ?
-    ''', (user_id, current_month))
-    
-    result = cursor.fetchone()
-    current_usage = result[0] if result else 0
-    
-    # Set new usage count
-    new_usage_count = min(current_usage + used, MONTHLY_LIMIT)
-    cursor.execute('''
-        INSERT OR REPLACE INTO usage_stats (user_id, month, usage_count)
-        VALUES (?, ?, ?)
-    ''', (user_id, current_month, new_usage_count))
-    
-    conn.commit()
-    conn.close()
-    
-    return max(MONTHLY_LIMIT - new_usage_count, 0)
+    if USE_MONGODB:
+        # MongoDB version
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            # Update usage count atomically
+            result = db.usage_stats_collection.find_one_and_update(
+                {"user_id": user_id, "month": current_month},
+                {
+                    "$inc": {"usage_count": used},
+                    "$setOnInsert": {"created_at": datetime.now()}
+                },
+                upsert=True,
+                return_document=True  # Return updated document
+            )
+            
+            new_usage_count = result.get('usage_count', used)
+            return max(MONTHLY_LIMIT - new_usage_count, 0)
+            
+        except Exception as e:
+            logger.error(f"Error updating credits in MongoDB: {e}")
+            return new_val
+    else:
+        # SQLite version (original code)
+        current_month = datetime.now().strftime("%Y-%m")
+        conn = sqlite3.connect(db.db_path)
+        cursor = conn.cursor()
+        
+        # Get current usage
+        cursor.execute('''
+            SELECT usage_count FROM usage_stats
+            WHERE user_id = ? AND month = ?
+        ''', (user_id, current_month))
+        
+        result = cursor.fetchone()
+        current_usage = result[0] if result else 0
+        
+        # Set new usage count
+        new_usage_count = min(current_usage + used, MONTHLY_LIMIT)
+        cursor.execute('''
+            INSERT OR REPLACE INTO usage_stats (user_id, month, usage_count)
+            VALUES (?, ?, ?)
+        ''', (user_id, current_month, new_usage_count))
+        
+        conn.commit()
+        conn.close()
+        
+        return max(MONTHLY_LIMIT - new_usage_count, 0)
 
 def run_topic_search(topic) -> List[Dict[str, str]]:
     """Main search function that uses Perplexity - Hebrew only output"""
@@ -1249,6 +1276,9 @@ class WatchBotMongoDB:
         
         # יצירת אינדקסים
         self._create_indexes()
+        
+        # מיגרציה של נתוני שימוש מ-SQLite אם קיימים
+        self._migrate_usage_data_if_needed()
     
     def _create_indexes(self):
         """יצירת אינדקסים לביצועים טובים יותר"""
@@ -1265,6 +1295,59 @@ class WatchBotMongoDB:
             logger.info("MongoDB indexes created successfully")
         except Exception as e:
             logger.error(f"Error creating MongoDB indexes: {e}")
+    
+    def _migrate_usage_data_if_needed(self):
+        """מיגרציה של נתוני שימוש מ-SQLite ל-MongoDB אם נדרש"""
+        try:
+            # בדיקה אם יש נתוני שימוש ב-MongoDB כבר
+            existing_count = self.usage_stats_collection.count_documents({})
+            if existing_count > 0:
+                logger.info(f"MongoDB already has {existing_count} usage records, skipping migration")
+                return
+            
+            # ניסיון לקרוא מ-SQLite
+            sqlite_db_path = DB_PATH
+            if not os.path.exists(sqlite_db_path):
+                logger.info("No SQLite database found, no migration needed")
+                return
+            
+            conn = sqlite3.connect(sqlite_db_path)
+            cursor = conn.cursor()
+            
+            # בדיקה אם יש טבלת usage_stats
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_stats'")
+            if not cursor.fetchone():
+                logger.info("No usage_stats table in SQLite, no migration needed")
+                conn.close()
+                return
+            
+            # קריאת כל נתוני השימוש מ-SQLite
+            cursor.execute("SELECT user_id, month, usage_count FROM usage_stats WHERE usage_count > 0")
+            sqlite_data = cursor.fetchall()
+            conn.close()
+            
+            if not sqlite_data:
+                logger.info("No usage data in SQLite to migrate")
+                return
+            
+            # העברת הנתונים ל-MongoDB
+            documents_to_insert = []
+            for user_id, month, usage_count in sqlite_data:
+                documents_to_insert.append({
+                    "user_id": user_id,
+                    "month": month,
+                    "usage_count": usage_count,
+                    "created_at": datetime.now(),
+                    "migrated_from_sqlite": True
+                })
+            
+            if documents_to_insert:
+                self.usage_stats_collection.insert_many(documents_to_insert)
+                logger.info(f"Successfully migrated {len(documents_to_insert)} usage records from SQLite to MongoDB")
+            
+        except Exception as e:
+            logger.error(f"Error during usage data migration: {e}")
+            # לא נעצור את התהליך בגלל שגיאה במיגרציה
     
     def get_recent_users_activity(self) -> List[Dict[str, Any]]:
         """קבלת רשימת משתמשים שהשתמשו השבוע - גרסת MongoDB"""
@@ -1431,6 +1514,64 @@ class WatchBotMongoDB:
         except Exception as e:
             logger.error(f"Error adding watch topic to MongoDB: {e}")
             return None
+    
+    def get_user_usage(self, user_id: int) -> Dict[str, int]:
+        """קבלת נתוני שימוש של משתמש - גרסת MongoDB"""
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            usage_doc = self.usage_stats_collection.find_one({
+                "user_id": user_id,
+                "month": current_month
+            })
+            
+            current_usage = usage_doc['usage_count'] if usage_doc else 0
+            
+            return {
+                'current_usage': current_usage,
+                'monthly_limit': MONTHLY_LIMIT,
+                'remaining': MONTHLY_LIMIT - current_usage
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting user usage from MongoDB: {e}")
+            # Fallback to default values
+            return {
+                'current_usage': 0,
+                'monthly_limit': MONTHLY_LIMIT,
+                'remaining': MONTHLY_LIMIT
+            }
+    
+    def check_user_usage(self, user_id: int) -> bool:
+        """בדיקה אם המשתמש יכול לבצע חיפוש נוסף - גרסת MongoDB"""
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            usage_doc = self.usage_stats_collection.find_one({
+                "user_id": user_id,
+                "month": current_month
+            })
+            
+            current_usage = usage_doc['usage_count'] if usage_doc else 0
+            
+            if current_usage >= MONTHLY_LIMIT:
+                return False
+            
+            # עדכון השימוש
+            self.usage_stats_collection.update_one(
+                {"user_id": user_id, "month": current_month},
+                {
+                    "$inc": {"usage_count": 1},
+                    "$setOnInsert": {"created_at": datetime.now()}
+                },
+                upsert=True
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking user usage in MongoDB: {e}")
+            return False
 
 
 class SmartWatcher:
