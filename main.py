@@ -1125,7 +1125,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not topics:
         message = "📭 אין לכם נושאים במעקב כרגע.\nהשתמשו בכפתור 'הוסף נושא חדש' כדי להתחיל."
-        await update.message.reply_text(message, reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text(message, reply_markup=get_main_menu_keyboard(user_id))
         return
     
     message = "📋 הנושאים שלכם במעקב:\n\n"
@@ -1368,7 +1368,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                     text=f"📊 הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\n"
                          f"הבדיקה החד-פעמית לנושא החדש לא בוצעה.\n\n"
                          f"🔍 להצגת פרטי השימוש: /start ← 📊 שימוש נוכחי",
-                    reply_markup=get_main_menu_keyboard(),
+                    reply_markup=get_main_menu_keyboard(user_id),
                     **_LP_KW
                 )
             except Exception as e:
@@ -1451,7 +1451,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=user_id,
                 text=f"❌ אירעה שגיאה בבדיקה החד-פעמית של הנושא: {topic_name}\n"
                      f"הבדיקות הקבועות יפעלו כרגיל.",
-                reply_markup=get_main_menu_keyboard(),
+                reply_markup=get_main_menu_keyboard(user_id),
                 **_LP_KW
             )
         except Exception as send_error:
@@ -1481,7 +1481,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                         text=f"📊 הגעת למכסת {MONTHLY_LIMIT} הבדיקות החודשיות שלך.\n"
                              f"המעקב יתחדש אוטומטיות בתחילת החודש הבא.\n\n"
                              f"🔍 להצגת פרטי השימוש: /start ← 📊 שימוש נוכחי",
-                        reply_markup=get_main_menu_keyboard(),
+                        reply_markup=get_main_menu_keyboard(topic['user_id']),
                         **_LP_KW
                     )
                 except Exception as e:
@@ -1541,7 +1541,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                         text=f"✅ הושלמו 5 הבדיקות עבור הנושא: {topic['topic']}\n\n"
                              f"🔍 המעקב עבור נושא זה הסתיים\n"
                              f"💡 תוכל להוסיף אותו שוב אם תרצה להמשיך במעקב",
-                        reply_markup=get_main_menu_keyboard(),
+                        reply_markup=get_main_menu_keyboard(topic['user_id']),
                         **_LP_KW
                     )
                     logger.info(f"Sent completion notification for topic {topic['id']}")
@@ -1590,7 +1590,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 בחרו פעולה:
 """
-            await query.edit_message_text(message, reply_markup=get_main_menu_keyboard())
+            await query.edit_message_text(message, reply_markup=get_main_menu_keyboard(user_id))
             
         elif data == "add_topic":
             # הוספת נושא חדש
@@ -1946,7 +1946,7 @@ async def show_topics_list(query, user_id):
     
     if not topics:
         message = "📭 אין לכם נושאים במעקב כרגע.\nהשתמשו בכפתור 'הוסף נושא חדש' כדי להתחיל."
-        await query.edit_message_text(message, reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text(message, reply_markup=get_main_menu_keyboard(user_id))
         return
     
     message = "📋 הנושאים שלכם במעקב:\n\n"
@@ -2070,7 +2070,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # אם אין מצב מיוחד, הצגת התפריט הראשי
     await update.message.reply_text(
         "🤖 בחרו פעולה מהתפריט:",
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=get_main_menu_keyboard(user_id)
     )
 
 def main():
