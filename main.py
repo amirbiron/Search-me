@@ -55,6 +55,9 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
 
+# לוג משתני סביבה חשובים
+logger.info(f"Environment variables loaded - ADMIN_ID: {ADMIN_ID}, BOT_TOKEN: {'SET' if BOT_TOKEN else 'NOT SET'}")
+
 # קבועים
 MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
 DEFAULT_PROVIDER = "perplexity"
@@ -800,8 +803,13 @@ def get_main_menu_keyboard(user_id=None):
     ]
     
     # הוספת כפתור אדמין אם המשתמש הוא אדמין
+    logger.info(f"Checking admin access: user_id={user_id}, ADMIN_ID={ADMIN_ID}, match={user_id == ADMIN_ID}")
     if user_id == ADMIN_ID:
+        logger.info("Adding admin button for recent users")
         keyboard.append([InlineKeyboardButton("👥 משתמשים אחרונים", callback_data="recent_users")])
+    else:
+        # לוג זמני לדיבוג - הסר אחרי שהבעיה תיפתר
+        logger.info(f"User {user_id} is not admin (ADMIN_ID={ADMIN_ID})")
     
     return InlineKeyboardMarkup(keyboard)
 
