@@ -655,6 +655,11 @@ def translate_title_to_hebrew(title: str) -> str:
     if not title:
         return "מידע חדש"
     
+    # אם הכותרת כבר מכילה עברית, החזר אותה כמו שהיא
+    hebrew_chars = any(ord(char) >= 0x0590 and ord(char) <= 0x05FF for char in title)
+    if hebrew_chars:
+        return title
+    
     # מילון תרגום למילות מפתח נפוצות
     translations = {
         # טכנולוגיה
@@ -745,7 +750,7 @@ async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: 
         return
         
     items = make_hebrew_list(results)
-    msg = f"🔔 עדכון חדש עבור: {topic_text}\n\n👇 הנה התוצאות שמצאתי:\n\n{items}\n\n⏰ נבדק עכשיו"
+    msg = f"🔔 עדכון חדש עבור הנושא: {topic_text}\n\n📰 מצאתי מידע חדש ורלוונטי:\n\n{items}\n\n⏰ נבדק ברגע זה"
     
     try:
         await bot.send_message(chat_id, msg, **_LP_KW)
@@ -765,16 +770,16 @@ def perform_search(query: str) -> list[dict]:
         {
             "role": "system",
             "content": (
-                "You are an expert AI search assistant. You MUST respond with ONLY a JSON array of the top 5-7 web search results for the user's query. "
-                "Each result must be a JSON object with exactly these fields: 'title', 'url', 'summary'. "
-                "The 'summary' should be a brief 1-2 sentence description in Hebrew explaining what the link contains. "
-                "CRITICAL: All URLs must be full, absolute URLs that start with 'https://' and be valid, working links. "
-                "Respond ONLY with the JSON array, no other text."
+                "אתה עוזר חיפוש מומחה. עליך להחזיר רק מערך JSON של 5-7 תוצאות חיפוש מובילות עבור השאילתה של המשתמש. "
+                "כל תוצאה חייבת להיות אובייקט JSON עם השדות הבאים בדיוק: 'title', 'url', 'summary'. "
+                "ה-'title' צריך להיות בעברית, ה-'summary' צריך להיות תיאור קצר של 1-2 משפטים בעברית המסביר מה מכיל הקישור. "
+                "חשוב מאוד: כל הקישורים חייבים להיות קישורים מלאים ותקינים שמתחילים ב-'https://' ועובדים. "
+                "החזר רק את מערך ה-JSON, ללא טקסט נוסף."
             ),
         },
         {
             "role": "user",
-            "content": f"Search query: {query}",
+            "content": f"חפש מידע על: {query}",
         },
     ]
 
