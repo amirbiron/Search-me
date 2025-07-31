@@ -20,6 +20,7 @@ import re
 import requests
 from pymongo import MongoClient
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
@@ -213,6 +214,38 @@ class WatchBotDB:
                 UPDATE watch_topics SET is_active = 0
                 WHERE user_id = ? AND topic LIKE ? AND is_active = 1
             ''', (user_id, f'%{topic_identifier}%'))
+        
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+    
+    def update_topic_text(self, user_id: int, topic_id: str, new_text: str) -> bool:
+        """עדכון טקסט הנושא"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE watch_topics 
+            SET topic = ? 
+            WHERE user_id = ? AND id = ? AND is_active = 1
+        ''', (new_text, user_id, int(topic_id)))
+        
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+    
+    def update_topic_frequency(self, user_id: int, topic_id: str, new_frequency: int) -> bool:
+        """עדכון תדירות בדיקת הנושא"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE watch_topics 
+            SET check_interval = ? 
+            WHERE user_id = ? AND id = ? AND is_active = 1
+        ''', (new_frequency, user_id, int(topic_id)))
         
         success = cursor.rowcount > 0
         conn.commit()
@@ -571,19 +604,8 @@ def run_topic_search(topic) -> List[Dict[str, str]]:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("[Perplexity] raw response: %s", perplexity_results)
         
-        # Convert Perplexity results to expected format
-        results = []
-        for result in perplexity_results:
-            title = result.get('title', 'ללא כותרת')
-            url = result.get('link', '')
-            
-            # תרגום הכותרת לעברית
-            hebrew_title = translate_title_to_hebrew(title)
-            
-            results.append({
-                'title': hebrew_title,
-                'url': url
-            })
+        # הפונקציה perform_search כבר מחזירה את הפורמט הנכון עם סיכומים
+        results = perplexity_results
         
         logger.info("✅ Perplexity success: %d results", len(results))
         return results
@@ -696,15 +718,22 @@ def translate_title_to_hebrew(title: str) -> str:
     return hebrew_title
 
 def make_hebrew_list(results: List[Dict[str, str]]) -> str:
-    """Create Hebrew-only consolidated message from results"""
+    """Create Hebrew-only consolidated message from results with summaries"""
     lines = []
     for r in results:
         title = (r.get("title") or "").strip()
         url = (r.get("url") or "").strip()
+        summary = (r.get("summary") or "").strip()
+        
         if not url:
             continue
+            
         # הכותרת כבר מתורגמת, פשוט נשתמש בה
-        lines.append(f"• {title}\n🔗 {url}")
+        line = f"• {title}"
+        if summary:
+            line += f"\n📄 {summary}"
+        line += f"\n🔗 {url}"
+        lines.append(line)
     return "\n\n".join(lines)
 
 async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: List[Dict[str, str]]):
@@ -736,9 +765,11 @@ def perform_search(query: str) -> list[dict]:
         {
             "role": "system",
             "content": (
-                "You are an expert AI search assistant. You MUST respond with ONLY a markdown-formatted list of the top 5-7 web search results for the user's query. "
-                "Each line must strictly follow the format: - [Result Title](URL). "
-                "CRITICAL: All URLs in the list must be full, absolute URLs that start with 'https://'." #  <--  ההנחיה החדשה
+                "You are an expert AI search assistant. You MUST respond with ONLY a JSON array of the top 5-7 web search results for the user's query. "
+                "Each result must be a JSON object with exactly these fields: 'title', 'url', 'summary'. "
+                "The 'summary' should be a brief 1-2 sentence description in Hebrew explaining what the link contains. "
+                "CRITICAL: All URLs must be full, absolute URLs that start with 'https://' and be valid, working links. "
+                "Respond ONLY with the JSON array, no other text."
             ),
         },
         {
@@ -754,14 +785,57 @@ def perform_search(query: str) -> list[dict]:
         )
         content = response.choices[0].message.content
         
-        results = []
-        matches = re.findall(r'\[(.*?)\]\((https?://.*?)\)', content)
-        
-        for match in matches:
-            title, link = match
-            results.append({'title': title.strip(), 'link': link.strip()})
-        
-        return results
+        # ניסיון לפרסר JSON
+        try:
+            results_json = json.loads(content)
+            results = []
+            
+            for item in results_json:
+                if isinstance(item, dict) and 'title' in item and 'url' in item:
+                    # בדיקת תקינות הקישור
+                    url = item.get('url', '').strip()
+                    if not url.startswith(('http://', 'https://')):
+                        continue
+                        
+                    # בדיקה שהקישור לא מכיל תווים לא תקינים
+                    if any(char in url for char in [' ', '\n', '\r', '\t']):
+                        continue
+                    
+                    title = item.get('title', 'ללא כותרת').strip()
+                    summary = item.get('summary', '').strip()
+                    
+                    # תרגום הכותרת לעברית
+                    hebrew_title = translate_title_to_hebrew(title)
+                    
+                    results.append({
+                        'title': hebrew_title,
+                        'url': url,
+                        'summary': summary if summary else f"מקור מידע זמין - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
+                    })
+            
+            return results
+            
+        except json.JSONDecodeError:
+            # אם JSON לא תקין, ננסה לפרסר כמרקדאון (fallback)
+            logger.warning("Failed to parse JSON response, trying markdown fallback")
+            results = []
+            matches = re.findall(r'\[(.*?)\]\((https?://[^\s\)]+)\)', content)
+            
+            for match in matches:
+                title, link = match
+                # בדיקת תקינות הקישור
+                link = link.strip()
+                if any(char in link for char in [' ', '\n', '\r', '\t']):
+                    continue
+                    
+                hebrew_title = translate_title_to_hebrew(title.strip())
+                results.append({
+                    'title': hebrew_title,
+                    'url': link,
+                    'summary': f"מקור מידע זמין - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
+                })
+            
+            return results
 
     except Exception as e:
         logger.error(f"An error occurred while calling the Perplexity API: {e}")
@@ -988,6 +1062,30 @@ class SmartWatcher:
         
         topic_obj = TopicObj(topic, user_id, user_id)
         return run_topic_search(topic_obj)
+    
+    def update_topic_text(self, user_id: int, topic_id: str, new_text: str) -> bool:
+        """עדכון טקסט הנושא"""
+        try:
+            result = self.watch_topics_collection.update_one(
+                {"user_id": user_id, "_id": ObjectId(topic_id), "is_active": True},
+                {"$set": {"topic": new_text}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating topic text: {e}")
+            return False
+    
+    def update_topic_frequency(self, user_id: int, topic_id: str, new_frequency: int) -> bool:
+        """עדכון תדירות בדיקת הנושא"""
+        try:
+            result = self.watch_topics_collection.update_one(
+                {"user_id": user_id, "_id": ObjectId(topic_id), "is_active": True},
+                {"$set": {"check_interval": new_frequency}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating topic frequency: {e}")
+            return False
 
 # יצירת אובייקטי המערכת
 if USE_MONGODB:
@@ -1018,9 +1116,7 @@ def get_main_menu_keyboard(user_id=None):
     """יצירת תפריט הכפתורים הראשי"""
     keyboard = []
     
-    # הוספת כפתור פקודות מהירות רק לאדמין
-    if user_id == ADMIN_ID:
-        keyboard.append([InlineKeyboardButton("☰ פקודות מהירות", callback_data="quick_commands")])
+
     
     keyboard.extend([
         [InlineKeyboardButton("📌 הוסף נושא חדש", callback_data="add_topic")],
@@ -1063,6 +1159,46 @@ def get_frequency_keyboard():
         [InlineKeyboardButton("אחת ל-7 ימים", callback_data="freq_168")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+async def show_frequency_selection(query, user_id, topic_id, is_edit=False):
+    """הצגת תפריט בחירת תדירות לעריכה"""
+    # קבלת פרטי הנושא
+    topics = db.get_user_topics(user_id)
+    topic = next((t for t in topics if str(t['id']) == str(topic_id)), None)
+    
+    if not topic:
+        await query.edit_message_text(
+            "❌ הנושא לא נמצא.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+        return
+    
+    current_freq = {
+        6: "כל 6 שעות",
+        12: "כל 12 שעות", 
+        24: "כל 24 שעות",
+        48: "כל 48 שעות",
+        168: "אחת לשבוע"
+    }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+    
+    message = f"""⏰ עריכת תדירות עדכון
+
+📝 נושא: {topic['topic']}
+🕐 תדירות נוכחית: {current_freq}
+
+בחרו תדירות חדשה:"""
+    
+    keyboard = [
+        [InlineKeyboardButton("כל 6 שעות", callback_data=f"update_freq_{topic_id}_6")],
+        [InlineKeyboardButton("כל 12 שעות", callback_data=f"update_freq_{topic_id}_12")],
+        [InlineKeyboardButton("כל 24 שעות (ברירת מחדל)", callback_data=f"update_freq_{topic_id}_24")],
+        [InlineKeyboardButton("כל 48 שעות", callback_data=f"update_freq_{topic_id}_48")],
+        [InlineKeyboardButton("אחת ל-7 ימים", callback_data=f"update_freq_{topic_id}_168")],
+        [InlineKeyboardButton("🔙 חזרה לעריכה", callback_data=f"edit_topic_{topic_id}")],
+        [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
+    ]
+    
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # פקודות הבוט
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1608,7 +1744,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ביטול", callback_data="main_menu")]])
             )
             
-        elif data == "list_topics":
+        elif data == "list_topics" or data == "show_topics":
             # הצגת רשימת נושאים
             await show_topics_list(query, user_id)
             
@@ -1742,6 +1878,64 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # עריכת נושא
             topic_id = data.split("_")[2]
             await show_edit_topic_menu(query, user_id, topic_id)
+        
+        elif data.startswith("edit_text_"):
+            # עריכת טקסט הנושא
+            topic_id = data.split("_")[2]
+            user_states[user_id] = {'action': 'edit_topic_text', 'topic_id': topic_id}
+            
+            # קבלת פרטי הנושא הנוכחי
+            topics = db.get_user_topics(user_id)
+            topic = next((t for t in topics if str(t['id']) == str(topic_id)), None)
+            
+            if topic:
+                await query.edit_message_text(
+                    f"✏️ עריכת טקסט הנושא\n\n"
+                    f"הטקסט הנוכחי: {topic['topic']}\n\n"
+                    f"אנא שלחו את הטקסט החדש:",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ ביטול", callback_data="main_menu")]])
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ הנושא לא נמצא.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                )
+        
+        elif data.startswith("edit_freq_"):
+            # עריכת תדירות העדכון
+            topic_id = data.split("_")[2]
+            await show_frequency_selection(query, user_id, topic_id, is_edit=True)
+        
+        elif data.startswith("update_freq_"):
+            # עדכון תדירות הנושא
+            parts = data.split("_")
+            topic_id = parts[2]
+            new_frequency = int(parts[3])
+            
+            # עדכון התדירות בבסיס הנתונים
+            success = db.update_topic_frequency(user_id, topic_id, new_frequency)
+            
+            freq_text = {
+                6: "כל 6 שעות",
+                12: "כל 12 שעות", 
+                24: "כל 24 שעות",
+                48: "כל 48 שעות",
+                168: "אחת לשבוע"
+            }.get(new_frequency, f"כל {new_frequency} שעות")
+            
+            if success:
+                await query.edit_message_text(
+                    f"✅ התדירות עודכנה בהצלחה!\n\nתדירות חדשה: {freq_text}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 חזרה לרשימת נושאים", callback_data="show_topics")],
+                        [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
+                    ])
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ שגיאה בעדכון התדירות. אנא נסו שוב.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                )
             
     except Exception as e:
         logger.error(f"Error in button callback: {e}")
@@ -2160,9 +2354,34 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     
+    # בדיקה אם המשתמש במצב עריכת טקסט נושא
+    if user_id in user_states and user_states[user_id].get("action") == "edit_topic_text":
+        topic_id = user_states[user_id].get("topic_id")
+        
+        # עדכון הטקסט בבסיס הנתונים
+        success = db.update_topic_text(user_id, topic_id, text)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ הטקסט עודכן בהצלחה!\n\nהטקסט החדש: {text}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 חזרה לרשימת נושאים", callback_data="show_topics")],
+                    [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
+                ])
+            )
+        else:
+            await update.message.reply_text(
+                "❌ שגיאה בעדכון הטקסט. אנא נסו שוב.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+            )
+        
+        # ניקוי מצב המשתמש
+        del user_states[user_id]
+        return
+    
     # אם אין מצב מיוחד, הצגת התפריט הראשי
     await update.message.reply_text(
-        "🤖 בחרו פעולה מהתפריט:",
+        "🤖 שלום! בחרו פעולה מהתפריט הראשי:",
         reply_markup=get_main_menu_keyboard(user_id)
     )
 
