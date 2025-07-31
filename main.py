@@ -458,7 +458,14 @@ class WatchBotDB:
                     'usage_count': 0,
                     'topics_added': 0
                 }
-            users_activity[user_id]['activity_dates'].append(activity_date)
+            # המרת תאריך מ-YYYY-MM-DD ל-DD/MM/YYYY
+            if activity_date:
+                try:
+                    date_obj = datetime.strptime(activity_date, "%Y-%m-%d")
+                    formatted_date = date_obj.strftime("%d/%m/%Y")
+                    users_activity[user_id]['activity_dates'].append(formatted_date)
+                except:
+                    users_activity[user_id]['activity_dates'].append(activity_date)
             users_activity[user_id]['topics_added'] += topics_count
         
         # עיבוד נתוני שימוש
@@ -476,7 +483,12 @@ class WatchBotDB:
             
             # הוספת תאריך הצטרפות אם השבוע
             if join_date >= week_ago:
-                users_activity[user_id]['activity_dates'].append(join_date)
+                try:
+                    date_obj = datetime.strptime(join_date, "%Y-%m-%d")
+                    formatted_date = date_obj.strftime("%d/%m/%Y")
+                    users_activity[user_id]['activity_dates'].append(formatted_date)
+                except:
+                    users_activity[user_id]['activity_dates'].append(join_date)
         
         return list(users_activity.values())
     
@@ -857,7 +869,7 @@ class WatchBotMongoDB:
                                 "as": "topic",
                                 "in": {
                                     "$dateToString": {
-                                        "format": "%Y-%m-%d",
+                                        "format": "%d/%m/%Y",
                                         "date": "$$topic.created_at"
                                     }
                                 }
@@ -875,7 +887,7 @@ class WatchBotMongoDB:
                                         "$activity_dates",
                                         [{
                                             "$dateToString": {
-                                                "format": "%Y-%m-%d",
+                                                "format": "%d/%m/%Y",
                                                 "date": "$created_at"
                                             }
                                         }]
@@ -1716,10 +1728,15 @@ async def show_recent_users(query):
                 
                 # פורמט תאריכי פעילות
                 if activity_dates:
-                    last_activity = max(activity_dates)
-                    activity_text = f"📅 פעילות אחרונה: {last_activity}"
-                    activity_days = len(set(activity_dates))
-                    activity_text += f" ({activity_days} ימי פעילות)"
+                    unique_dates = list(set(activity_dates))
+                    unique_dates.sort(key=lambda x: datetime.strptime(x, "%d/%m/%Y"), reverse=True)
+                    last_activity = unique_dates[0]
+                    activity_days = len(unique_dates)
+                    
+                    if activity_days == 1:
+                        activity_text = f"📅 פעיל ב: {last_activity}"
+                    else:
+                        activity_text = f"📅 פעילות אחרונה: {last_activity} ({activity_days} ימים)"
                 else:
                     activity_text = "📅 ללא פעילות השבוע"
                 
