@@ -772,7 +772,8 @@ def perform_search(query: str) -> list[dict]:
             "content": (
                 "אתה עוזר חיפוש מומחה. עליך להחזיר רק מערך JSON של 5-7 תוצאות חיפוש מובילות עבור השאילתה של המשתמש. "
                 "כל תוצאה חייבת להיות אובייקט JSON עם השדות הבאים בדיוק: 'title', 'url', 'summary'. "
-                "ה-'title' יכול להיות בשפה המקורית של המקור, ה-'summary' חייב להיות תיאור קצר של 1-2 משפטים בעברית המסביר מה מכיל הקישור. "
+                "ה-'title' חייב להיות בעברית (תרגם את הכותרת המקורית לעברית), ה-'summary' חייב להיות תיאור קצר של 1-2 משפטים בעברית המסביר מה מכיל הקישור. "
+                "הקישורים יכולים להיות למקורות באנגלית או בכל שפה אחרת, אבל הכותרות והסיכומים חייבים להיות בעברית. "
                 "חשוב מאוד: כל הקישורים חייבים להיות קישורים מלאים ותקינים שמתחילים ב-'https://' ועובדים. "
                 "החזר רק את מערך ה-JSON, ללא טקסט נוסף."
             ),
@@ -809,11 +810,13 @@ def perform_search(query: str) -> list[dict]:
                     title = item.get('title', 'ללא כותרת').strip()
                     summary = item.get('summary', '').strip()
                     
-                    # השארת הכותרת בשפה המקורית
+                    # וידוא שהכותרת בעברית - אם לא, נתרגם אותה
+                    hebrew_title = translate_title_to_hebrew(title)
+                    
                     results.append({
-                        'title': title,
+                        'title': hebrew_title,
                         'url': url,
-                        'summary': summary if summary else f"מקור מידע זמין - {title[:50]}{'...' if len(title) > 50 else ''}"
+                        'summary': summary if summary else f"מקור מידע זמין - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
                     })
             
             return results
@@ -832,10 +835,11 @@ def perform_search(query: str) -> list[dict]:
                     continue
                     
                 title_clean = title.strip()
+                hebrew_title = translate_title_to_hebrew(title_clean)
                 results.append({
-                    'title': title_clean,
+                    'title': hebrew_title,
                     'url': link,
-                    'summary': f"מקור מידע זמין - {title_clean[:50]}{'...' if len(title_clean) > 50 else ''}"
+                    'summary': f"מקור מידע זמין - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
                 })
             
             return results
