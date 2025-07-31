@@ -1159,8 +1159,12 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
         message += f"   🕐 נבדק: {last_check}\n\n"
         
-        # הוספת כפתור מחיקה לכל נושא
-        keyboard.append([InlineKeyboardButton(f"🗑️ מחק '{topic['topic'][:20]}{'...' if len(topic['topic']) > 20 else ''}'", callback_data=f"delete_topic_{topic['id']}")])
+        # הוספת כפתורי עריכה ומחיקה לכל נושא
+        topic_name_short = topic['topic'][:15] + ('...' if len(topic['topic']) > 15 else '')
+        keyboard.append([
+            InlineKeyboardButton(f"✏️ ערוך '{topic_name_short}'", callback_data=f"edit_topic_{topic['id']}"),
+            InlineKeyboardButton(f"🗑️ מחק '{topic_name_short}'", callback_data=f"delete_topic_{topic['id']}")
+        ])
     
     # הוספת כפתור חזרה לתפריט
     keyboard.append([InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")])
@@ -1733,6 +1737,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"❌ שגיאה במחיקת הנושא. אנא נסו שוב.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
                 )
+        
+        elif data.startswith("edit_topic_"):
+            # עריכת נושא
+            topic_id = data.split("_")[2]
+            await show_edit_topic_menu(query, user_id, topic_id)
             
     except Exception as e:
         logger.error(f"Error in button callback: {e}")
@@ -1944,6 +1953,82 @@ async def show_recent_users(query, from_quick_commands=False):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
         )
 
+async def show_edit_topic_menu(query, user_id, topic_id):
+    """הצגת תפריט עריכת נושא"""
+    # קבלת פרטי הנושא
+    topics = db.get_user_topics(user_id)
+    topic = next((t for t in topics if str(t['id']) == str(topic_id)), None)
+    
+    if not topic:
+        await query.edit_message_text(
+            "❌ הנושא לא נמצא.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+        return
+    
+    # הצגת פרטי הנושא הנוכחיים
+    freq_text = {
+        6: "כל 6 שעות",
+        12: "כל 12 שעות", 
+        24: "כל 24 שעות",
+        48: "כל 48 שעות",
+        168: "אחת לשבוע"
+    }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+    
+    message = f"""✏️ עריכת נושא מעקב
+
+📝 נושא נוכחי: {topic['topic']}
+⏰ תדירות נוכחית: {freq_text}
+
+מה תרצו לערוך?"""
+    
+    keyboard = [
+        [InlineKeyboardButton("📝 שנה את הטקסט", callback_data=f"edit_text_{topic_id}")],
+        [InlineKeyboardButton("⏰ שנה תדירות", callback_data=f"edit_freq_{topic_id}")],
+        [InlineKeyboardButton("🔙 חזרה לרשימה", callback_data="show_topics")],
+        [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
+    ]
+    
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard)        )
+
+async def show_edit_topic_menu(query, user_id, topic_id):
+    """הצגת תפריט עריכת נושא"""
+    # קבלת פרטי הנושא
+    topics = db.get_user_topics(user_id)
+    topic = next((t for t in topics if str(t['id']) == str(topic_id)), None)
+    
+    if not topic:
+        await query.edit_message_text(
+            "❌ הנושא לא נמצא.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+        return
+    
+    # הצגת פרטי הנושא הנוכחיים
+    freq_text = {
+        6: "כל 6 שעות",
+        12: "כל 12 שעות", 
+        24: "כל 24 שעות",
+        48: "כל 48 שעות",
+        168: "אחת לשבוע"
+    }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+    
+    message = f"""✏️ עריכת נושא מעקב
+
+📝 נושא נוכחי: {topic['topic']}
+⏰ תדירות נוכחית: {freq_text}
+
+מה תרצו לערוך?"""
+    
+    keyboard = [
+        [InlineKeyboardButton("📝 שנה את הטקסט", callback_data=f"edit_text_{topic_id}")],
+        [InlineKeyboardButton("⏰ שנה תדירות", callback_data=f"edit_freq_{topic_id}")],
+        [InlineKeyboardButton("🔙 חזרה לרשימה", callback_data="show_topics")],
+        [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
+    ]
+    
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def show_topics_list(query, user_id):
     """הצגת רשימת נושאים"""
     topics = db.get_user_topics(user_id)
@@ -1980,8 +2065,12 @@ async def show_topics_list(query, user_id):
         message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
         message += f"   🕐 נבדק: {last_check}\n\n"
         
-        # הוספת כפתור מחיקה לכל נושא
-        keyboard.append([InlineKeyboardButton(f"🗑️ מחק '{topic['topic'][:20]}{'...' if len(topic['topic']) > 20 else ''}'", callback_data=f"delete_topic_{topic['id']}")])
+        # הוספת כפתורי עריכה ומחיקה לכל נושא
+        topic_name_short = topic['topic'][:15] + ('...' if len(topic['topic']) > 15 else '')
+        keyboard.append([
+            InlineKeyboardButton(f"✏️ ערוך '{topic_name_short}'", callback_data=f"edit_topic_{topic['id']}"),
+            InlineKeyboardButton(f"🗑️ מחק '{topic_name_short}'", callback_data=f"delete_topic_{topic['id']}")
+        ])
     
     # הוספת כפתור חזרה לתפריט
     keyboard.append([InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")])
