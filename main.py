@@ -1016,15 +1016,20 @@ def run_flask():
 
 def get_main_menu_keyboard(user_id=None):
     """יצירת תפריט הכפתורים הראשי"""
-    keyboard = [
-        [InlineKeyboardButton("☰ פקודות מהירות", callback_data="quick_commands")],
+    keyboard = []
+    
+    # הוספת כפתור פקודות מהירות רק לאדמין
+    if user_id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("☰ פקודות מהירות", callback_data="quick_commands")])
+    
+    keyboard.extend([
         [InlineKeyboardButton("📌 הוסף נושא חדש", callback_data="add_topic")],
         [InlineKeyboardButton("📋 הצג רשימת נושאים", callback_data="list_topics")],
         [InlineKeyboardButton("⏸️ השבת מעקב", callback_data="pause_tracking"),
          InlineKeyboardButton("▶️ הפעל מחדש", callback_data="resume_tracking")],
         [InlineKeyboardButton("📊 שימוש נוכחי", callback_data="usage_stats"),
          InlineKeyboardButton("❓ עזרה", callback_data="help")]
-    ]
+    ])
     
     # הוספת כפתור אדמין אם המשתמש הוא אדמין
     logger.info(f"Checking admin access: user_id={user_id}, ADMIN_ID={ADMIN_ID}, match={user_id == ADMIN_ID}")
@@ -1038,16 +1043,12 @@ def get_main_menu_keyboard(user_id=None):
     return InlineKeyboardMarkup(keyboard)
 
 def get_quick_commands_keyboard(user_id=None):
-    """יצירת תפריט פקודות מהירות"""
+    """יצירת תפריט פקודות מהירות (רק לאדמין)"""
     keyboard = [
         [InlineKeyboardButton("👤 /whoami - מידע עליי", callback_data="run_whoami")],
+        [InlineKeyboardButton("👥 /recent_users - משתמשים אחרונים", callback_data="run_recent_users")],
+        [InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]
     ]
-    
-    # הוספת כפתור recent_users רק לאדמין
-    if user_id == ADMIN_ID:
-        keyboard.append([InlineKeyboardButton("👥 /recent_users - משתמשים אחרונים", callback_data="run_recent_users")])
-    
-    keyboard.append([InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")])
     
     return InlineKeyboardMarkup(keyboard)
 
