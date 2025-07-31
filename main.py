@@ -1183,7 +1183,7 @@ def perform_search(query: str) -> list[dict]:
                     refined_content = refined_response.choices[0].message.content
                     refined_results_json = json.loads(refined_content)
                     
-                                            for item in refined_results_json:
+                                        for item in refined_results_json:
                         if isinstance(item, dict) and 'title' in item and 'url' in item and len(results) < 7:
                             url = item.get('url', '').strip()
                             if not url.startswith(('http://', 'https://')):
