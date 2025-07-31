@@ -659,8 +659,23 @@ def is_relevant_result(result: dict, query: str) -> bool:
     summary = result.get('summary', '').lower()
     query_lower = query.lower()
     
-    # מילים שצריך להתעלם מהן בבדיקת רלוונטיות
-    stop_words = {'של', 'על', 'את', 'עם', 'אל', 'מן', 'כל', 'זה', 'זו', 'אם', 'או', 'גם', 'כי', 'לא', 'היא', 'הוא', 'אני', 'אתה', 'אתם', 'הם', 'הן', 'כך', 'כן', 'לכן', 'אך', 'אבל', 'רק', 'עוד', 'פה', 'שם', 'איך', 'מה', 'מי', 'איפה', 'מתי', 'למה', 'כמה', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must', 'shall', 'this', 'that', 'these', 'those', 'a', 'an'}
+    # מילים שצריך להתעלם מהן בבדיקת רלוונטיות (מילות עצירה)
+    stop_words = {
+        # עברית
+        'של', 'על', 'את', 'עם', 'אל', 'מן', 'כל', 'זה', 'זו', 'אם', 'או', 'גם', 'כי', 'לא', 'היא', 'הוא', 
+        'אני', 'אתה', 'אתם', 'הם', 'הן', 'כך', 'כן', 'לכן', 'אך', 'אבל', 'רק', 'עוד', 'פה', 'שם', 
+        'איך', 'מה', 'מי', 'איפה', 'מתי', 'למה', 'כמה', 'אחד', 'אחת', 'שני', 'שתי', 'יש', 'אין',
+        'היה', 'הייתה', 'יהיה', 'תהיה', 'בין', 'תחת', 'מעל', 'ליד', 'אצל', 'נגד', 'בלי', 'חוץ',
+        # אנגלית
+        'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 
+        'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 
+        'should', 'may', 'might', 'can', 'must', 'shall', 'this', 'that', 'these', 'those', 'a', 'an',
+        'about', 'after', 'all', 'also', 'any', 'because', 'before', 'being', 'between', 'both', 'each',
+        'few', 'first', 'get', 'here', 'how', 'into', 'its', 'just', 'like', 'make', 'most', 'new', 'no',
+        'not', 'now', 'only', 'other', 'our', 'out', 'over', 'said', 'same', 'see', 'some', 'take', 'than',
+        'them', 'through', 'time', 'two', 'up', 'use', 'very', 'way', 'well', 'what', 'where', 'which',
+        'who', 'work', 'year', 'years', 'your'
+    }
     
     # חילוץ מילות מפתח מהשאילתה
     query_keywords = []
@@ -719,10 +734,10 @@ def rank_results_by_relevance(results: List[Dict], query: str) -> List[Dict]:
             elif keyword in summary:
                 score += 1.5
         
-        # ניקוד נוסף למילות מפתח ספציפיות
-        specific_keywords = ['idm', 'internet download manager', 'באג', 'בעיה', 'פתרון', 'עדכון']
-        for specific in specific_keywords:
-            if specific in content:
+        # ניקוד נוסף למילות מפתח חשובות מהשאילתה המקורית
+        important_words = [word for word in query_keywords if len(word) > 4]  # מילים ארוכות יותר בדרך כלל חשובות יותר
+        for important_word in important_words:
+            if important_word in content:
                 score += 2.0
         
         # ניקוד לאורך הסיכום (סיכומים ארוכים יותר בדרך כלל יותר מידעיים)
@@ -873,33 +888,98 @@ async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: 
     except Exception as e:
         logger.error("Failed to send Hebrew message to user %s: %s", chat_id, e)
 
+def analyze_query_intent(query: str) -> dict:
+    """ניתוח כוונת השאילתה לשיפור החיפוש"""
+    query_lower = query.lower()
+    intent_info = {
+        'type': 'general',
+        'keywords': [],
+        'search_modifiers': []
+    }
+    
+    # זיהוי סוגי שאילתות שונים
+    if any(word in query_lower for word in ['איך', 'כיצד', 'מה הדרך', 'how to', 'how can']):
+        intent_info['type'] = 'how_to'
+        intent_info['search_modifiers'].append('מדריך')
+        intent_info['search_modifiers'].append('הדרכה')
+    
+    elif any(word in query_lower for word in ['מה זה', 'מה הם', 'what is', 'what are', 'הגדרה']):
+        intent_info['type'] = 'definition'
+        intent_info['search_modifiers'].append('הגדרה')
+        intent_info['search_modifiers'].append('הסבר')
+    
+    elif any(word in query_lower for word in ['בעיה', 'באג', 'שגיאה', 'תקלה', 'לא עובד', 'problem', 'error', 'bug', 'issue']):
+        intent_info['type'] = 'troubleshooting'
+        intent_info['search_modifiers'].append('פתרון')
+        intent_info['search_modifiers'].append('תיקון')
+    
+    elif any(word in query_lower for word in ['עדכון', 'חדש', 'אחרון', 'update', 'latest', 'new']):
+        intent_info['type'] = 'news_update'
+        intent_info['search_modifiers'].append('עדכונים')
+        intent_info['search_modifiers'].append('חדשות')
+    
+    elif any(word in query_lower for word in ['ביקורת', 'דעה', 'חוות דעת', 'review', 'opinion']):
+        intent_info['type'] = 'review'
+        intent_info['search_modifiers'].append('ביקורת')
+        intent_info['search_modifiers'].append('דעות')
+    
+    return intent_info
+
 def perform_search(query: str) -> list[dict]:
     """
     Performs a search using the Perplexity API with the 'sonar-pro' model.
+    Enhanced with query intent analysis for better results.
     """
     if not API_KEY:
         logger.error("PERPLEXITY_API_KEY environment variable is not set or empty.")
         return []
+    
+    # ניתוח כוונת השאילתה
+    intent_info = analyze_query_intent(query)
+    logger.info(f"Query intent analysis: type='{intent_info['type']}', modifiers={intent_info['search_modifiers']}")
 
+    # התאמת ההנחיות לפי סוג השאילתה
+    system_content = (
+        "אתה עוזר חיפוש מומחה מתמחה במציאת תוכן רלוונטי ומדויק. "
+        "עליך להחזיר רק מערך JSON של 5-7 תוצאות חיפוש המתמקדות ישירות בנושא הספציפי שהמשתמש ביקש. "
+        "כל תוצאה חייבת להיות אובייקט JSON עם השדות הבאים בדיוק: 'title', 'url', 'summary'. "
+    )
+    
+    # הוספת הנחיות ספציפיות לפי סוג השאילתה
+    if intent_info['type'] == 'how_to':
+        system_content += "התמקד במדריכים, הדרכות ומקורות שמסבירים איך לעשות את הדבר המבוקש. "
+    elif intent_info['type'] == 'definition':
+        system_content += "התמקד בהגדרות, הסברים ומקורות שמסבירים מה זה הדבר המבוקש. "
+    elif intent_info['type'] == 'troubleshooting':
+        system_content += "התמקד בפתרונות, תיקונים ומקורות שעוזרים לפתור בעיות. "
+    elif intent_info['type'] == 'news_update':
+        system_content += "התמקד בחדשות, עדכונים ומידע עדכני על הנושא. "
+    elif intent_info['type'] == 'review':
+        system_content += "התמקד בביקורות, דעות וחוות דעת על הנושא. "
+    
+    system_content += (
+        "חשוב מאוד: "
+        "1. התמקד רק בתוכן הרלוונטי ישירות לנושא הספציפי - אל תכלול תוכן כללי או לא קשור "
+        "2. ה-'title' חייב להיות בעברית (תרגם את הכותרת המקורית לעברית) "
+        "3. ה-'summary' חייב להיות תיאור קצר של 1-2 משפטים בעברית המסביר בדיוק מה מכיל הקישור ואיך זה קשור לנושא "
+        "4. כל הקישורים חייבים להיות קישורים מלאים ותקינים שמתחילים ב-'https://' ועובדים "
+        "5. אל תכלול מקורות שהם רק בערך קשורים - רק מקורות שעוסקים ישירות בנושא "
+        "החזר רק את מערך ה-JSON, ללא טקסט נוסף."
+    )
+    
+    # בניית שאילתת החיפוש המשופרת
+    enhanced_query = query
+    if intent_info['search_modifiers']:
+        enhanced_query += " " + " ".join(intent_info['search_modifiers'])
+    
     messages = [
         {
             "role": "system",
-            "content": (
-                "אתה עוזר חיפוש מומחה מתמחה במציאת תוכן רלוונטי ומדויק. "
-                "עליך להחזיר רק מערך JSON של 5-7 תוצאות חיפוש המתמקדות ישירות בנושא הספציפי שהמשתמש ביקש. "
-                "כל תוצאה חייבת להיות אובייקט JSON עם השדות הבאים בדיוק: 'title', 'url', 'summary'. "
-                "חשוב מאוד: "
-                "1. התמקד רק בתוכן הרלוונטי ישירות לנושא הספציפי - אל תכלול תוכן כללי או לא קשור "
-                "2. ה-'title' חייב להיות בעברית (תרגם את הכותרת המקורית לעברית) "
-                "3. ה-'summary' חייב להיות תיאור קצר של 1-2 משפטים בעברית המסביר בדיוק מה מכיל הקישור ואיך זה קשור לנושא "
-                "4. כל הקישורים חייבים להיות קישורים מלאים ותקינים שמתחילים ב-'https://' ועובדים "
-                "5. אל תכלול מקורות שהם רק בערך קשורים - רק מקורות שעוסקים ישירות בנושא "
-                "החזר רק את מערך ה-JSON, ללא טקסט נוסף."
-            ),
+            "content": system_content,
         },
         {
             "role": "user",
-            "content": f"חפש מידע רלוונטי ומדויק על הנושא הספציפי הזה: {query}. התמקד רק במקורות שעוסקים ישירות בנושא זה ולא בנושאים כלליים או קשורים.",
+            "content": f"חפש מידע רלוונטי ומדויק על הנושא הספציפי הזה: {enhanced_query}. חשוב מאוד: התמקד רק במקורות שעוסקים ישירות ובאופן ספציפי בנושא המבוקש. אל תכלול מקורות כלליים, מקורות שעוסקים בנושאים דומים או קשורים, או מקורות שרק מזכירים את הנושא בהקשר אחר. כל מקור חייב להיות ממוקד ורלוונטי במישרין לשאילתה.",
         },
     ]
 
