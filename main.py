@@ -21,6 +21,7 @@ import requests
 from pymongo import MongoClient
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
@@ -554,6 +555,10 @@ class WatchBotDB:
         conn.commit()
         conn.close()
         return True
+    
+    def check_user_usage(self, user_id: int) -> bool:
+        """בדיקה אם המשתמש יכול לבצע חיפוש נוסף - גרסת SQLite"""
+        return self.increment_usage(user_id)
 
 def log_search(provider: str, topic_id: int, query: str):
     """Log search with trimmed query"""
@@ -565,31 +570,54 @@ def decrement_credits(user_id: int, used: int = 1) -> int:
     prev = prev_usage['remaining']
     new_val = max(prev - used, 0)
     
-    # Update the usage count
-    current_month = datetime.now().strftime("%Y-%m")
-    conn = sqlite3.connect(db.db_path)
-    cursor = conn.cursor()
-    
-    # Get current usage
-    cursor.execute('''
-        SELECT usage_count FROM usage_stats
-        WHERE user_id = ? AND month = ?
-    ''', (user_id, current_month))
-    
-    result = cursor.fetchone()
-    current_usage = result[0] if result else 0
-    
-    # Set new usage count
-    new_usage_count = min(current_usage + used, MONTHLY_LIMIT)
-    cursor.execute('''
-        INSERT OR REPLACE INTO usage_stats (user_id, month, usage_count)
-        VALUES (?, ?, ?)
-    ''', (user_id, current_month, new_usage_count))
-    
-    conn.commit()
-    conn.close()
-    
-    return max(MONTHLY_LIMIT - new_usage_count, 0)
+    if USE_MONGODB:
+        # MongoDB version
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            # Update usage count atomically
+            result = db.usage_stats_collection.find_one_and_update(
+                {"user_id": user_id, "month": current_month},
+                {
+                    "$inc": {"usage_count": used},
+                    "$setOnInsert": {"created_at": datetime.now()}
+                },
+                upsert=True,
+                return_document=True  # Return updated document
+            )
+            
+            new_usage_count = result.get('usage_count', used)
+            return max(MONTHLY_LIMIT - new_usage_count, 0)
+            
+        except Exception as e:
+            logger.error(f"Error updating credits in MongoDB: {e}")
+            return new_val
+    else:
+        # SQLite version (original code)
+        current_month = datetime.now().strftime("%Y-%m")
+        conn = sqlite3.connect(db.db_path)
+        cursor = conn.cursor()
+        
+        # Get current usage
+        cursor.execute('''
+            SELECT usage_count FROM usage_stats
+            WHERE user_id = ? AND month = ?
+        ''', (user_id, current_month))
+        
+        result = cursor.fetchone()
+        current_usage = result[0] if result else 0
+        
+        # Set new usage count
+        new_usage_count = min(current_usage + used, MONTHLY_LIMIT)
+        cursor.execute('''
+            INSERT OR REPLACE INTO usage_stats (user_id, month, usage_count)
+            VALUES (?, ?, ?)
+        ''', (user_id, current_month, new_usage_count))
+        
+        conn.commit()
+        conn.close()
+        
+        return max(MONTHLY_LIMIT - new_usage_count, 0)
 
 def run_topic_search(topic) -> List[Dict[str, str]]:
     """Main search function that uses Perplexity - Hebrew only output"""
@@ -650,14 +678,85 @@ def is_valid_result(r: dict) -> bool:
     """Check if result has required title and url fields"""
     return bool(r.get("title") and r.get("url"))
 
+def validate_url(url: str, timeout: int = 5) -> bool:
+    """
+    בדיקת תקינות URL - בודק אם הקישור נגיש ולא מחזיר 404
+    """
+    if not url or not url.startswith(('http://', 'https://')):
+        return False
+    
+    try:
+        # בדיקת תווים לא חוקיים
+        if any(char in url for char in [' ', '\n', '\r', '\t']):
+            return False
+            
+        # בדיקה מהירה עם HEAD request
+        response = requests.head(url, timeout=timeout, allow_redirects=True, 
+                               headers={'User-Agent': 'Mozilla/5.0 (compatible; WatchBot/1.0)'})
+        
+        # אם HEAD לא עובד, נסה GET עם טווח מוגבל
+        if response.status_code == 405:  # Method Not Allowed
+            response = requests.get(url, timeout=timeout, allow_redirects=True,
+                                  headers={'User-Agent': 'Mozilla/5.0 (compatible; WatchBot/1.0)',
+                                          'Range': 'bytes=0-1023'})  # רק 1KB ראשון
+        
+        # קבל קישורים עם status codes תקינים
+        return response.status_code in [200, 206, 301, 302, 303, 307, 308]
+        
+    except (requests.RequestException, requests.Timeout, Exception) as e:
+        logger.debug(f"URL validation failed for {url}: {e}")
+        return False
+
 def is_relevant_result(result: dict, query: str) -> bool:
-    """בדיקת רלוונטיות של תוצאת חיפוש לשאילתה המקורית"""
+    """בדיקת רלוונטיות של תוצאת חיפוש לשאילתה המקורית - משופרת"""
     if not result or not query:
         return False
     
     title = result.get('title', '').lower()
     summary = result.get('summary', '').lower()
+    url = result.get('url', '').lower()
     query_lower = query.lower()
+    
+    # בדיקת סוג התוכן לפי URL - סינון תוכן לא רלוונטי
+    irrelevant_patterns = [
+        'youtube.com/watch',  # סרטוני יוטיוב כשלא מבקשים מדריכי וידאו
+        'tiktok.com',
+        'instagram.com',
+        'facebook.com/posts',
+        'twitter.com',
+        'reddit.com/r/',  # פוסטים ברדיט
+        'pinterest.com',
+        'linkedin.com/posts'
+    ]
+    
+    # בדיקה אם השאילתה מבקשת ספציפית מדריכי וידאו
+    video_request = any(word in query_lower for word in [
+        'וידאו', 'סרטון', 'מדריך וידאו', 'video', 'tutorial video', 'youtube'
+    ])
+    
+    # אם לא מבקשים וידאו אבל התוצאה היא וידאו - דחה
+    if not video_request and any(pattern in url for pattern in irrelevant_patterns[:1]):  # רק יוטיוב
+        logger.debug(f"Filtered out video result when not requested: {title[:50]}")
+        return False
+    
+    # בדיקת התאמה בין סוג השאילתה לסוג התוכן
+    query_intent = analyze_query_intent(query)
+    
+    # אם מבקשים עדכוני תוכנה אבל מקבלים מדריך כללי - בדוק קפדנית יותר
+    if query_intent['type'] in ['software_update', 'news_update', 'troubleshooting']:
+        if any(word in title + summary for word in ['מדריך כללי', 'הדרכה בסיסית', 'למתחילים', 'tutorial', 'basic guide']):
+            # בדוק אם יש גם מילים רלוונטיות לעדכונים/תיקונים
+            relevant_words = ['עדכון', 'גרסה', 'תיקון', 'באג', 'פתרון', 'update', 'version', 'fix', 'bug', 'changelog', 'release notes']
+            if not any(word in title + summary for word in relevant_words):
+                logger.debug(f"Filtered out generic tutorial for update/troubleshooting query: {title[:50]}")
+                return False
+        
+        # סינון נוסף לעדכוני תוכנה - דחיית מדריכי וידאו כשמחפשים עדכונים
+        if query_intent['type'] == 'software_update':
+            video_indicators = ['וידאו', 'סרטון', 'צפייה', 'video', 'watch', 'tutorial video']
+            if any(indicator in title + summary for indicator in video_indicators):
+                logger.debug(f"Filtered out video tutorial for software update query: {title[:50]}")
+                return False
     
     # מילים שצריך להתעלם מהן בבדיקת רלוונטיות (מילות עצירה)
     stop_words = {
@@ -702,8 +801,8 @@ def is_relevant_result(result: dict, query: str) -> bool:
     
     total_score = matches + partial_matches
     
-    # דרוש לפחות 25% התאמה למילות המפתח
-    relevance_threshold = max(1, len(query_keywords) * 0.25)
+    # דרוש לפחות 30% התאמה למילות המפתח (הוגבר מ-25%)
+    relevance_threshold = max(1, len(query_keywords) * 0.3)
     is_relevant = total_score >= relevance_threshold
     
     # לוגינג לדיבוג
@@ -889,39 +988,63 @@ async def send_results_hebrew_only(bot, chat_id: int, topic_text: str, results: 
         logger.error("Failed to send Hebrew message to user %s: %s", chat_id, e)
 
 def analyze_query_intent(query: str) -> dict:
-    """ניתוח כוונת השאילתה לשיפור החיפוש"""
+    """ניתוח כוונת השאילתה לשיפור החיפוש - משופר"""
     query_lower = query.lower()
     intent_info = {
         'type': 'general',
         'keywords': [],
-        'search_modifiers': []
+        'search_modifiers': [],
+        'software_name': None
     }
     
-    # זיהוי סוגי שאילתות שונים
-    if any(word in query_lower for word in ['איך', 'כיצד', 'מה הדרך', 'how to', 'how can']):
-        intent_info['type'] = 'how_to'
-        intent_info['search_modifiers'].append('מדריך')
-        intent_info['search_modifiers'].append('הדרכה')
+    # זיהוי שם תוכנה ספציפית
+    software_patterns = [
+        'idm', 'internet download manager', 'chrome', 'firefox', 'windows', 'office', 
+        'photoshop', 'vlc', 'winrar', 'telegram', 'whatsapp', 'zoom', 'teams'
+    ]
     
-    elif any(word in query_lower for word in ['מה זה', 'מה הם', 'what is', 'what are', 'הגדרה']):
-        intent_info['type'] = 'definition'
-        intent_info['search_modifiers'].append('הגדרה')
-        intent_info['search_modifiers'].append('הסבר')
+    for software in software_patterns:
+        if software in query_lower:
+            intent_info['software_name'] = software
+            break
     
-    elif any(word in query_lower for word in ['בעיה', 'באג', 'שגיאה', 'תקלה', 'לא עובד', 'problem', 'error', 'bug', 'issue']):
+    # זיהוי סוגי שאילתות שונים - בסדר עדיפות
+    
+    # עדכוני תוכנה - עדיפות גבוהה
+    if any(word in query_lower for word in ['עדכון', 'עדכונים', 'גרסה', 'update', 'updates', 'version', 'latest version']):
+        if intent_info['software_name'] or any(word in query_lower for word in ['תוכנה', 'תוכנת', 'software', 'program', 'app']):
+            intent_info['type'] = 'software_update'
+            intent_info['search_modifiers'].extend(['עדכון תוכנה', 'גרסה חדשה', 'changelog'])
+        else:
+            intent_info['type'] = 'news_update'
+            intent_info['search_modifiers'].extend(['עדכונים', 'חדשות'])
+    
+    # פתרון בעיות - עדיפות גבוהה
+    elif any(word in query_lower for word in ['בעיה', 'באג', 'שגיאה', 'תקלה', 'לא עובד', 'תיקון', 'פתרון', 'problem', 'error', 'bug', 'issue', 'fix', 'solve']):
         intent_info['type'] = 'troubleshooting'
-        intent_info['search_modifiers'].append('פתרון')
-        intent_info['search_modifiers'].append('תיקון')
+        intent_info['search_modifiers'].extend(['פתרון', 'תיקון', 'פתרון בעיות'])
+        if intent_info['software_name']:
+            intent_info['search_modifiers'].append(f'פתרון בעיות {intent_info["software_name"]}')
     
-    elif any(word in query_lower for word in ['עדכון', 'חדש', 'אחרון', 'update', 'latest', 'new']):
-        intent_info['type'] = 'news_update'
-        intent_info['search_modifiers'].append('עדכונים')
-        intent_info['search_modifiers'].append('חדשות')
+    # מדריכים והדרכות
+    elif any(word in query_lower for word in ['איך', 'כיצד', 'מה הדרך', 'how to', 'how can', 'tutorial', 'guide']):
+        intent_info['type'] = 'how_to'
+        intent_info['search_modifiers'].extend(['מדריך', 'הדרכה', 'הוראות'])
     
-    elif any(word in query_lower for word in ['ביקורת', 'דעה', 'חוות דעת', 'review', 'opinion']):
+    # הגדרות והסברים
+    elif any(word in query_lower for word in ['מה זה', 'מה הם', 'what is', 'what are', 'הגדרה', 'definition']):
+        intent_info['type'] = 'definition'
+        intent_info['search_modifiers'].extend(['הגדרה', 'הסבר', 'מה זה'])
+    
+    # ביקורות ודעות
+    elif any(word in query_lower for word in ['ביקורת', 'דעה', 'חוות דעת', 'review', 'opinion', 'rating']):
         intent_info['type'] = 'review'
-        intent_info['search_modifiers'].append('ביקורת')
-        intent_info['search_modifiers'].append('דעות')
+        intent_info['search_modifiers'].extend(['ביקורת', 'דעות', 'חוות דעת'])
+    
+    # חדשות כלליות
+    elif any(word in query_lower for word in ['חדש', 'אחרון', 'חדשות', 'new', 'latest', 'news']):
+        intent_info['type'] = 'news_update'
+        intent_info['search_modifiers'].extend(['חדשות', 'מידע עדכני'])
     
     return intent_info
 
@@ -952,6 +1075,8 @@ def perform_search(query: str) -> list[dict]:
         system_content += "התמקד בהגדרות, הסברים ומקורות שמסבירים מה זה הדבר המבוקש. "
     elif intent_info['type'] == 'troubleshooting':
         system_content += "התמקד בפתרונות, תיקונים ומקורות שעוזרים לפתור בעיות. "
+    elif intent_info['type'] == 'software_update':
+        system_content += "התמקד בעדכוני תוכנה, גרסאות חדשות, changelog, ותיקוני באגים. אל תכלול מדריכים כלליים או סרטוני הדרכה. "
     elif intent_info['type'] == 'news_update':
         system_content += "התמקד בחדשות, עדכונים ומידע עדכני על הנושא. "
     elif intent_info['type'] == 'review':
@@ -997,13 +1122,18 @@ def perform_search(query: str) -> list[dict]:
             
             for item in results_json:
                 if isinstance(item, dict) and 'title' in item and 'url' in item:
-                    # בדיקת תקינות הקישור
+                    # בדיקת תקינות הקישור - בסיסית ומתקדמת
                     url = item.get('url', '').strip()
                     if not url.startswith(('http://', 'https://')):
                         continue
                         
                     # בדיקה שהקישור לא מכיל תווים לא תקינים
                     if any(char in url for char in [' ', '\n', '\r', '\t']):
+                        continue
+                    
+                    # בדיקת נגישות הקישור (עם timeout קצר)
+                    if not validate_url(url, timeout=3):
+                        logger.debug(f"Skipping inaccessible URL: {url}")
                         continue
                     
                     title = item.get('title', 'ללא כותרת').strip()
@@ -1053,12 +1183,17 @@ def perform_search(query: str) -> list[dict]:
                     refined_content = refined_response.choices[0].message.content
                     refined_results_json = json.loads(refined_content)
                     
-                    for item in refined_results_json:
+                                            for item in refined_results_json:
                         if isinstance(item, dict) and 'title' in item and 'url' in item and len(results) < 7:
                             url = item.get('url', '').strip()
                             if not url.startswith(('http://', 'https://')):
                                 continue
                             if any(char in url for char in [' ', '\n', '\r', '\t']):
+                                continue
+                            
+                            # בדיקת נגישות הקישור גם בחיפוש המעודן
+                            if not validate_url(url, timeout=3):
+                                logger.debug(f"Skipping inaccessible refined URL: {url}")
                                 continue
                             
                             title = item.get('title', 'ללא כותרת').strip()
@@ -1094,6 +1229,11 @@ def perform_search(query: str) -> list[dict]:
                 # בדיקת תקינות הקישור
                 link = link.strip()
                 if any(char in link for char in [' ', '\n', '\r', '\t']):
+                    continue
+                
+                # בדיקת נגישות הקישור גם בfallback
+                if not validate_url(link, timeout=3):
+                    logger.debug(f"Skipping inaccessible fallback URL: {link}")
                     continue
                     
                 title_clean = title.strip()
@@ -1136,6 +1276,9 @@ class WatchBotMongoDB:
         
         # יצירת אינדקסים
         self._create_indexes()
+        
+        # מיגרציה של נתוני שימוש מ-SQLite אם קיימים
+        self._migrate_usage_data_if_needed()
     
     def _create_indexes(self):
         """יצירת אינדקסים לביצועים טובים יותר"""
@@ -1152,6 +1295,59 @@ class WatchBotMongoDB:
             logger.info("MongoDB indexes created successfully")
         except Exception as e:
             logger.error(f"Error creating MongoDB indexes: {e}")
+    
+    def _migrate_usage_data_if_needed(self):
+        """מיגרציה של נתוני שימוש מ-SQLite ל-MongoDB אם נדרש"""
+        try:
+            # בדיקה אם יש נתוני שימוש ב-MongoDB כבר
+            existing_count = self.usage_stats_collection.count_documents({})
+            if existing_count > 0:
+                logger.info(f"MongoDB already has {existing_count} usage records, skipping migration")
+                return
+            
+            # ניסיון לקרוא מ-SQLite
+            sqlite_db_path = DB_PATH
+            if not os.path.exists(sqlite_db_path):
+                logger.info("No SQLite database found, no migration needed")
+                return
+            
+            conn = sqlite3.connect(sqlite_db_path)
+            cursor = conn.cursor()
+            
+            # בדיקה אם יש טבלת usage_stats
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_stats'")
+            if not cursor.fetchone():
+                logger.info("No usage_stats table in SQLite, no migration needed")
+                conn.close()
+                return
+            
+            # קריאת כל נתוני השימוש מ-SQLite
+            cursor.execute("SELECT user_id, month, usage_count FROM usage_stats WHERE usage_count > 0")
+            sqlite_data = cursor.fetchall()
+            conn.close()
+            
+            if not sqlite_data:
+                logger.info("No usage data in SQLite to migrate")
+                return
+            
+            # העברת הנתונים ל-MongoDB
+            documents_to_insert = []
+            for user_id, month, usage_count in sqlite_data:
+                documents_to_insert.append({
+                    "user_id": user_id,
+                    "month": month,
+                    "usage_count": usage_count,
+                    "created_at": datetime.now(),
+                    "migrated_from_sqlite": True
+                })
+            
+            if documents_to_insert:
+                self.usage_stats_collection.insert_many(documents_to_insert)
+                logger.info(f"Successfully migrated {len(documents_to_insert)} usage records from SQLite to MongoDB")
+            
+        except Exception as e:
+            logger.error(f"Error during usage data migration: {e}")
+            # לא נעצור את התהליך בגלל שגיאה במיגרציה
     
     def get_recent_users_activity(self) -> List[Dict[str, Any]]:
         """קבלת רשימת משתמשים שהשתמשו השבוע - גרסת MongoDB"""
@@ -1318,6 +1514,64 @@ class WatchBotMongoDB:
         except Exception as e:
             logger.error(f"Error adding watch topic to MongoDB: {e}")
             return None
+    
+    def get_user_usage(self, user_id: int) -> Dict[str, int]:
+        """קבלת נתוני שימוש של משתמש - גרסת MongoDB"""
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            usage_doc = self.usage_stats_collection.find_one({
+                "user_id": user_id,
+                "month": current_month
+            })
+            
+            current_usage = usage_doc['usage_count'] if usage_doc else 0
+            
+            return {
+                'current_usage': current_usage,
+                'monthly_limit': MONTHLY_LIMIT,
+                'remaining': MONTHLY_LIMIT - current_usage
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting user usage from MongoDB: {e}")
+            # Fallback to default values
+            return {
+                'current_usage': 0,
+                'monthly_limit': MONTHLY_LIMIT,
+                'remaining': MONTHLY_LIMIT
+            }
+    
+    def check_user_usage(self, user_id: int) -> bool:
+        """בדיקה אם המשתמש יכול לבצע חיפוש נוסף - גרסת MongoDB"""
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            usage_doc = self.usage_stats_collection.find_one({
+                "user_id": user_id,
+                "month": current_month
+            })
+            
+            current_usage = usage_doc['usage_count'] if usage_doc else 0
+            
+            if current_usage >= MONTHLY_LIMIT:
+                return False
+            
+            # עדכון השימוש
+            self.usage_stats_collection.update_one(
+                {"user_id": user_id, "month": current_month},
+                {
+                    "$inc": {"usage_count": 1},
+                    "$setOnInsert": {"created_at": datetime.now()}
+                },
+                upsert=True
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking user usage in MongoDB: {e}")
+            return False
 
 
 class SmartWatcher:
