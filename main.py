@@ -399,6 +399,77 @@ class WatchBotDB:
             'remaining': MONTHLY_LIMIT - current_usage
         }
     
+    def get_recent_users_activity(self) -> List[Dict[str, Any]]:
+        """קבלת רשימת משתמשים שהשתמשו השבוע"""
+        # תאריך לפני שבוע
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # שאילתה לקבלת משתמשים שהיו פעילים השבוע
+        cursor.execute("""
+            SELECT DISTINCT u.user_id, u.username, 
+                   DATE(wt.created_at) as activity_date,
+                   COUNT(wt.id) as topics_added
+            FROM users u
+            LEFT JOIN watch_topics wt ON u.user_id = wt.user_id 
+            WHERE DATE(wt.created_at) >= ?
+            GROUP BY u.user_id, DATE(wt.created_at)
+            ORDER BY wt.created_at DESC
+        """, (week_ago,))
+        
+        activity_results = cursor.fetchall()
+        
+        # שאילתה נוספת לקבלת פעילות שימוש
+        cursor.execute("""
+            SELECT u.user_id, u.username, us.usage_count,
+                   DATE(u.created_at) as join_date
+            FROM users u
+            LEFT JOIN usage_stats us ON u.user_id = us.user_id 
+            WHERE DATE(u.created_at) >= ? OR us.month = ?
+            ORDER BY u.created_at DESC
+        """, (week_ago, datetime.now().strftime("%Y-%m")))
+        
+        usage_results = cursor.fetchall()
+        
+        conn.close()
+        
+        # עיבוד התוצאות
+        users_activity = {}
+        
+        # עיבוד פעילות נושאים
+        for user_id, username, activity_date, topics_count in activity_results:
+            if user_id not in users_activity:
+                users_activity[user_id] = {
+                    'user_id': user_id,
+                    'username': username or f"User_{user_id}",
+                    'activity_dates': [],
+                    'usage_count': 0,
+                    'topics_added': 0
+                }
+            users_activity[user_id]['activity_dates'].append(activity_date)
+            users_activity[user_id]['topics_added'] += topics_count
+        
+        # עיבוד נתוני שימוש
+        for user_id, username, usage_count, join_date in usage_results:
+            if user_id not in users_activity:
+                users_activity[user_id] = {
+                    'user_id': user_id,
+                    'username': username or f"User_{user_id}",
+                    'activity_dates': [],
+                    'usage_count': 0,
+                    'topics_added': 0
+                }
+            if usage_count:
+                users_activity[user_id]['usage_count'] = usage_count
+            
+            # הוספת תאריך הצטרפות אם השבוע
+            if join_date >= week_ago:
+                users_activity[user_id]['activity_dates'].append(join_date)
+        
+        return list(users_activity.values())
+    
     def increment_usage(self, user_id: int) -> bool:
         """עדכון שימוש של משתמש - מחזיר True אם עדיין יש מקום"""
         current_month = datetime.now().strftime("%Y-%m")
@@ -717,7 +788,7 @@ def run_flask():
     """הרצת שרת Flask ברקע"""
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-def get_main_menu_keyboard():
+def get_main_menu_keyboard(user_id=None):
     """יצירת תפריט הכפתורים הראשי"""
     keyboard = [
         [InlineKeyboardButton("📌 הוסף נושא חדש", callback_data="add_topic")],
@@ -727,6 +798,11 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton("📊 שימוש נוכחי", callback_data="usage_stats"),
          InlineKeyboardButton("❓ עזרה", callback_data="help")]
     ]
+    
+    # הוספת כפתור אדמין אם המשתמש הוא אדמין
+    if user_id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("👥 משתמשים אחרונים", callback_data="recent_users")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def get_frequency_keyboard():
