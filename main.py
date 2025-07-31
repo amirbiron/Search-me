@@ -1087,7 +1087,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 בחרו פעולה מהתפריט למטה:
 """
     
-    await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard())
+    await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard(user.id))
 
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הוספת נושא למעקב"""
