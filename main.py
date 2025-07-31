@@ -94,9 +94,18 @@ class WatchBotDB:
                 is_active BOOLEAN DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_checked TIMESTAMP,
+                checks_remaining INTEGER DEFAULT NULL,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
+        
+        # הוספת עמודת checks_remaining לטבלאות קיימות
+        try:
+            cursor.execute('ALTER TABLE watch_topics ADD COLUMN checks_remaining INTEGER DEFAULT NULL')
+            conn.commit()
+        except sqlite3.OperationalError:
+            # העמודה כבר קיימת
+            pass
         
         # טבלת תוצאות שנמצאו
         cursor.execute('''
@@ -138,14 +147,14 @@ class WatchBotDB:
         conn.commit()
         conn.close()
     
-    def add_watch_topic(self, user_id: int, topic: str, check_interval: int = 24) -> int:
+    def add_watch_topic(self, user_id: int, topic: str, check_interval: int = 24, checks_remaining: int = None) -> int:
         """הוספת נושא למעקב"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO watch_topics (user_id, topic, check_interval)
-            VALUES (?, ?, ?)
-        ''', (user_id, topic, check_interval))
+            INSERT INTO watch_topics (user_id, topic, check_interval, checks_remaining)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, topic, check_interval, checks_remaining))
         topic_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -156,7 +165,7 @@ class WatchBotDB:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, topic, check_interval, is_active, created_at, last_checked
+            SELECT id, topic, check_interval, is_active, created_at, last_checked, checks_remaining
             FROM watch_topics
             WHERE user_id = ? AND is_active = 1
             ORDER BY created_at DESC
@@ -170,7 +179,8 @@ class WatchBotDB:
                 'check_interval': row[2],
                 'is_active': row[3],
                 'created_at': row[4],
-                'last_checked': row[5]
+                'last_checked': row[5],
+                'checks_remaining': row[6]
             })
         
         conn.close()
@@ -218,7 +228,7 @@ class WatchBotDB:
         current_time = datetime.now()
         
         cursor.execute('''
-            SELECT wt.id, wt.user_id, wt.topic, wt.last_checked, wt.check_interval
+            SELECT wt.id, wt.user_id, wt.topic, wt.last_checked, wt.check_interval, wt.checks_remaining
             FROM watch_topics wt
             JOIN users u ON wt.user_id = u.user_id
             WHERE wt.is_active = 1 AND u.is_active = 1
@@ -226,18 +236,25 @@ class WatchBotDB:
         
         topics = []
         for row in cursor.fetchall():
-            topic_id, user_id, topic, last_checked, check_interval = row
+            topic_id, user_id, topic, last_checked, check_interval, checks_remaining = row
             
             # בדיקה אם הגיע הזמן לבדוק את הנושא
             should_check = False
             
-            if not last_checked:
+            # אם יש מגבלת בדיקות ונגמרו, לא לבדוק
+            if checks_remaining is not None and checks_remaining <= 0:
+                should_check = False
+            elif not last_checked:
                 should_check = True
             else:
                 last_check_time = datetime.fromisoformat(last_checked)
                 time_diff = current_time - last_check_time
                 
-                if time_diff >= timedelta(hours=check_interval):
+                # אם זה בדיקות של 5 דקות, בדוק כל 5 דקות
+                if check_interval == 0.0833:  # 5 דקות בשעות (5/60)
+                    if time_diff >= timedelta(minutes=5):
+                        should_check = True
+                elif time_diff >= timedelta(hours=check_interval):
                     should_check = True
             
             if should_check:
@@ -246,7 +263,8 @@ class WatchBotDB:
                     'user_id': user_id,
                     'topic': topic,
                     'last_checked': last_checked,
-                    'check_interval': check_interval
+                    'check_interval': check_interval,
+                    'checks_remaining': checks_remaining
                 })
         
         conn.close()
@@ -257,7 +275,7 @@ class WatchBotDB:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, user_id, topic, check_interval, is_active, created_at, last_checked
+            SELECT id, user_id, topic, check_interval, is_active, created_at, last_checked, checks_remaining
             FROM watch_topics
             WHERE id = ?
         ''', (topic_id,))
@@ -273,7 +291,8 @@ class WatchBotDB:
                 'check_interval': row[3],
                 'is_active': row[4],
                 'created_at': row[5],
-                'last_checked': row[6]
+                'last_checked': row[6],
+                'checks_remaining': row[7]
             }
         return None
     
@@ -318,13 +337,44 @@ class WatchBotDB:
             return None
     
     def update_topic_checked(self, topic_id: int):
-        """עדכון זמן הבדיקה האחרון"""
+        """עדכון זמן הבדיקה האחרון וספירת בדיקות נותרות"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE watch_topics SET last_checked = CURRENT_TIMESTAMP
-            WHERE id = ?
-        ''', (topic_id,))
+        
+        # קבלת מספר הבדיקות הנותרות הנוכחי
+        cursor.execute('SELECT checks_remaining FROM watch_topics WHERE id = ?', (topic_id,))
+        result = cursor.fetchone()
+        
+        if result and result[0] is not None:
+            checks_remaining = result[0]
+            if checks_remaining > 1:
+                # הפחתת מספר הבדיקות הנותרות
+                cursor.execute('''
+                    UPDATE watch_topics 
+                    SET last_checked = CURRENT_TIMESTAMP, checks_remaining = checks_remaining - 1
+                    WHERE id = ?
+                ''', (topic_id,))
+            elif checks_remaining == 1:
+                # זו הבדיקה האחרונה - הפוך את הנושא ללא פעיל
+                cursor.execute('''
+                    UPDATE watch_topics 
+                    SET last_checked = CURRENT_TIMESTAMP, checks_remaining = 0, is_active = 0
+                    WHERE id = ?
+                ''', (topic_id,))
+            else:
+                # אם כבר נגמרו הבדיקות, הפוך את הנושא ללא פעיל
+                cursor.execute('''
+                    UPDATE watch_topics 
+                    SET last_checked = CURRENT_TIMESTAMP, is_active = 0
+                    WHERE id = ?
+                ''', (topic_id,))
+        else:
+            # בדיקות רגילות ללא מגבלה
+            cursor.execute('''
+                UPDATE watch_topics SET last_checked = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (topic_id,))
+        
         conn.commit()
         conn.close()
     
@@ -682,6 +732,7 @@ def get_main_menu_keyboard():
 def get_frequency_keyboard():
     """יצירת תפריט בחירת תדירות"""
     keyboard = [
+        [InlineKeyboardButton("כל 5 דקות (5 פעמים בלבד)", callback_data="freq_5min")],
         [InlineKeyboardButton("כל 6 שעות", callback_data="freq_6")],
         [InlineKeyboardButton("כל 12 שעות", callback_data="freq_12")],
         [InlineKeyboardButton("כל 24 שעות (ברירת מחדל)", callback_data="freq_24")],
@@ -768,13 +819,16 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         
         # הוספת מידע על תדירות הבדיקה
-        freq_text = {
-            6: "כל 6 שעות",
-            12: "כל 12 שעות", 
-            24: "כל 24 שעות",
-            48: "כל 48 שעות",
-            168: "אחת לשבוע"
-        }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+        if topic['check_interval'] == 0.0833:
+            freq_text = f"כל 5 דקות ({topic.get('checks_remaining', 0)} נותרו)" if topic.get('checks_remaining') else "כל 5 דקות (הושלם)"
+        else:
+            freq_text = {
+                6: "כל 6 שעות",
+                12: "כל 12 שעות", 
+                24: "כל 24 שעות",
+                48: "כל 48 שעות",
+                168: "אחת לשבוע"
+            }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
         
         message += f"{i}. {status} {topic['topic']}\n"
         message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
@@ -1140,8 +1194,27 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
             else:
                 logger.info("No results found for topic %d", topic['id'])
             
+            # בדיקה אם זו הבדיקה האחרונה לנושא עם מגבלת בדיקות
+            checks_remaining = topic.get('checks_remaining')
+            is_last_check = checks_remaining is not None and checks_remaining == 1
+            
             # עדכון זמן הבדיקה
             db.update_topic_checked(topic['id'])
+            
+            # שליחת הודעה מיוחדת אם זו הבדיקה האחרונה
+            if is_last_check:
+                try:
+                    await context.bot.send_message(
+                        chat_id=topic['user_id'],
+                        text=f"✅ הושלמו 5 הבדיקות עבור הנושא: {topic['topic']}\n\n"
+                             f"🔍 המעקב עבור נושא זה הסתיים\n"
+                             f"💡 תוכל להוסיף אותו שוב אם תרצה להמשיך במעקב",
+                        reply_markup=get_main_menu_keyboard(),
+                        **_LP_KW
+                    )
+                    logger.info(f"Sent completion notification for topic {topic['id']}")
+                except Exception as e:
+                    logger.error(f"Failed to send completion notification for topic {topic['id']}: {e}")
             
             # המתנה קצרה בין נושאים למניעת עומס על ה-API
             await asyncio.sleep(2)
@@ -1225,7 +1298,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif data.startswith("freq_"):
             # בחירת תדירות לנושא חדש
-            frequency = int(data.split("_")[1])
+            if data == "freq_5min":
+                frequency = 0.0833  # 5 דקות בשעות (5/60)
+                checks_remaining = 5
+            else:
+                frequency = int(data.split("_")[1])
+                checks_remaining = None
+                
             if user_id in user_states and "pending_topic" in user_states[user_id]:
                 topic = user_states[user_id]["pending_topic"]
                 
@@ -1238,7 +1317,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 
-                topic_id = db.add_watch_topic(user_id, topic, frequency)
+                topic_id = db.add_watch_topic(user_id, topic, frequency, checks_remaining)
                 
                 # תזמון בדיקה חד-פעמית דקה לאחר הוספת הנושא
                 context.application.job_queue.run_once(
@@ -1248,13 +1327,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name=f"one_time_check_{topic_id}"
                 )
                 
-                freq_text = {
-                    6: "כל 6 שעות",
-                    12: "כל 12 שעות", 
-                    24: "כל 24 שעות",
-                    48: "כל 48 שעות",
-                    168: "אחת ל-7 ימים"
-                }.get(frequency, f"כל {frequency} שעות")
+                if frequency == 0.0833:
+                    freq_text = "כל 5 דקות (5 פעמים בלבד)"
+                else:
+                    freq_text = {
+                        6: "כל 6 שעות",
+                        12: "כל 12 שעות", 
+                        24: "כל 24 שעות",
+                        48: "כל 48 שעות",
+                        168: "אחת ל-7 ימים"
+                    }.get(frequency, f"כל {frequency} שעות")
                 
                 await query.edit_message_text(
                     f"✅ הנושא נוסף בהצלחה!\n\n"
@@ -1313,13 +1395,16 @@ async def show_topics_list(query, user_id):
             except:
                 pass
         
-        freq_text = {
-            6: "כל 6 שעות",
-            12: "כל 12 שעות", 
-            24: "כל 24 שעות",
-            48: "כל 48 שעות",
-            168: "אחת לשבוע"
-        }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
+        if topic['check_interval'] == 0.0833:
+            freq_text = f"כל 5 דקות ({topic.get('checks_remaining', 0)} נותרו)" if topic.get('checks_remaining') else "כל 5 דקות (הושלם)"
+        else:
+            freq_text = {
+                6: "כל 6 שעות",
+                12: "כל 12 שעות", 
+                24: "כל 24 שעות",
+                48: "כל 48 שעות",
+                168: "אחת לשבוע"
+            }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
         
         message += f"{i}. {status} {topic['topic']}\n"
         message += f"   🆔 {topic['id']} | ⏰ {freq_text}\n"
@@ -1453,6 +1538,13 @@ def main():
         check_topics_job,
         interval=timedelta(hours=24),
         first=timedelta(minutes=1)  # בדיקה ראשונה אחרי דקה
+    )
+    
+    # הפעלת בדיקה מהירה כל 5 דקות לנושאים מיוחדים
+    job_queue.run_repeating(
+        check_topics_job,
+        interval=timedelta(minutes=5),
+        first=timedelta(minutes=2)  # בדיקה ראשונה אחרי 2 דקות
     )
     
     logger.info("Starting bot with polling...")
