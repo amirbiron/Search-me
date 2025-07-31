@@ -650,6 +650,99 @@ def is_valid_result(r: dict) -> bool:
     """Check if result has required title and url fields"""
     return bool(r.get("title") and r.get("url"))
 
+def is_relevant_result(result: dict, query: str) -> bool:
+    """בדיקת רלוונטיות של תוצאת חיפוש לשאילתה המקורית"""
+    if not result or not query:
+        return False
+    
+    title = result.get('title', '').lower()
+    summary = result.get('summary', '').lower()
+    query_lower = query.lower()
+    
+    # מילים שצריך להתעלם מהן בבדיקת רלוונטיות
+    stop_words = {'של', 'על', 'את', 'עם', 'אל', 'מן', 'כל', 'זה', 'זו', 'אם', 'או', 'גם', 'כי', 'לא', 'היא', 'הוא', 'אני', 'אתה', 'אתם', 'הם', 'הן', 'כך', 'כן', 'לכן', 'אך', 'אבל', 'רק', 'עוד', 'פה', 'שם', 'איך', 'מה', 'מי', 'איפה', 'מתי', 'למה', 'כמה', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must', 'shall', 'this', 'that', 'these', 'those', 'a', 'an'}
+    
+    # חילוץ מילות מפתח מהשאילתה
+    query_keywords = []
+    for word in query_lower.split():
+        if len(word) > 2 and word not in stop_words:  # התעלם ממילים קצרות ומילות עצירה
+            query_keywords.append(word)
+    
+    if not query_keywords:
+        return True  # אם אין מילות מפתח, קבל את התוצאה
+    
+    # בדיקה אם לפחות מילת מפתח אחת מופיעה בכותרת או בסיכום
+    content_to_check = f"{title} {summary}"
+    matches = 0
+    partial_matches = 0
+    
+    for keyword in query_keywords:
+        if keyword in content_to_check:
+            matches += 1
+        elif len(keyword) > 4:  # בדיקת התאמה חלקית למילים ארוכות
+            for word in content_to_check.split():
+                if keyword in word or word in keyword:
+                    partial_matches += 0.5
+                    break
+    
+    total_score = matches + partial_matches
+    
+    # דרוש לפחות 25% התאמה למילות המפתח
+    relevance_threshold = max(1, len(query_keywords) * 0.25)
+    is_relevant = total_score >= relevance_threshold
+    
+    # לוגינג לדיבוג
+    if not is_relevant:
+        logger.debug(f"Relevance check failed: query='{query}', title='{title[:50]}', score={total_score}, threshold={relevance_threshold}")
+    
+    return is_relevant
+
+def rank_results_by_relevance(results: List[Dict], query: str) -> List[Dict]:
+    """דירוג תוצאות החיפוש לפי רלוונטיות"""
+    if not results or not query:
+        return results
+    
+    query_lower = query.lower()
+    query_keywords = [word for word in query_lower.split() if len(word) > 2]
+    
+    def calculate_relevance_score(result: Dict) -> float:
+        title = result.get('title', '').lower()
+        summary = result.get('summary', '').lower()
+        content = f"{title} {summary}"
+        
+        score = 0.0
+        
+        # ניקוד לפי מילות מפתח בכותרת (משקל גבוה יותר)
+        for keyword in query_keywords:
+            if keyword in title:
+                score += 3.0
+            elif keyword in summary:
+                score += 1.5
+        
+        # ניקוד נוסף למילות מפתח ספציפיות
+        specific_keywords = ['idm', 'internet download manager', 'באג', 'בעיה', 'פתרון', 'עדכון']
+        for specific in specific_keywords:
+            if specific in content:
+                score += 2.0
+        
+        # ניקוד לאורך הסיכום (סיכומים ארוכים יותר בדרך כלל יותר מידעיים)
+        summary_length = len(result.get('summary', ''))
+        if summary_length > 100:
+            score += 1.0
+        elif summary_length > 50:
+            score += 0.5
+        
+        return score
+    
+    # חישוב ניקוד לכל תוצאה
+    for result in results:
+        result['relevance_score'] = calculate_relevance_score(result)
+    
+    # מיון לפי ניקוד רלוונטיות (גבוה לנמוך)
+    sorted_results = sorted(results, key=lambda x: x.get('relevance_score', 0), reverse=True)
+    
+    return sorted_results
+
 def translate_title_to_hebrew(title: str) -> str:
     """תרגום כותרת מאנגלית לעברית - תרגום פשוט של מילות מפתח נפוצות"""
     if not title:
@@ -698,6 +791,28 @@ def translate_title_to_hebrew(title: str) -> str:
         "Apple": "אפל",
         "Google": "גוגל",
         "Microsoft": "מיקרוסופט",
+        "IDM": "IDM",
+        "Internet Download Manager": "מנהל הורדות אינטרנט",
+        "download manager": "מנהל הורדות",
+        "download": "הורדה",
+        "downloads": "הורדות",
+        "bug": "באג",
+        "bugs": "באגים",
+        "fix": "תיקון",
+        "fixes": "תיקונים",
+        "error": "שגיאה",
+        "errors": "שגיאות",
+        "issue": "בעיה",
+        "issues": "בעיות",
+        "problem": "בעיה",
+        "problems": "בעיות",
+        "solution": "פתרון",
+        "solutions": "פתרונות",
+        "troubleshooting": "פתרון בעיות",
+        "guide": "מדריך",
+        "tutorial": "הדרכה",
+        "help": "עזרה",
+        "support": "תמיכה",
         "iPhone": "אייפון",
         "iPad": "אייפד",
         "Galaxy": "גלקסי",
@@ -770,17 +885,21 @@ def perform_search(query: str) -> list[dict]:
         {
             "role": "system",
             "content": (
-                "אתה עוזר חיפוש מומחה. עליך להחזיר רק מערך JSON של 5-7 תוצאות חיפוש מובילות עבור השאילתה של המשתמש. "
+                "אתה עוזר חיפוש מומחה מתמחה במציאת תוכן רלוונטי ומדויק. "
+                "עליך להחזיר רק מערך JSON של 5-7 תוצאות חיפוש המתמקדות ישירות בנושא הספציפי שהמשתמש ביקש. "
                 "כל תוצאה חייבת להיות אובייקט JSON עם השדות הבאים בדיוק: 'title', 'url', 'summary'. "
-                "ה-'title' חייב להיות בעברית (תרגם את הכותרת המקורית לעברית), ה-'summary' חייב להיות תיאור קצר של 1-2 משפטים בעברית המסביר מה מכיל הקישור. "
-                "הקישורים יכולים להיות למקורות באנגלית או בכל שפה אחרת, אבל הכותרות והסיכומים חייבים להיות בעברית. "
-                "חשוב מאוד: כל הקישורים חייבים להיות קישורים מלאים ותקינים שמתחילים ב-'https://' ועובדים. "
+                "חשוב מאוד: "
+                "1. התמקד רק בתוכן הרלוונטי ישירות לנושא הספציפי - אל תכלול תוכן כללי או לא קשור "
+                "2. ה-'title' חייב להיות בעברית (תרגם את הכותרת המקורית לעברית) "
+                "3. ה-'summary' חייב להיות תיאור קצר של 1-2 משפטים בעברית המסביר בדיוק מה מכיל הקישור ואיך זה קשור לנושא "
+                "4. כל הקישורים חייבים להיות קישורים מלאים ותקינים שמתחילים ב-'https://' ועובדים "
+                "5. אל תכלול מקורות שהם רק בערך קשורים - רק מקורות שעוסקים ישירות בנושא "
                 "החזר רק את מערך ה-JSON, ללא טקסט נוסף."
             ),
         },
         {
             "role": "user",
-            "content": f"חפש מידע על: {query}",
+            "content": f"חפש מידע רלוונטי ומדויק על הנושא הספציפי הזה: {query}. התמקד רק במקורות שעוסקים ישירות בנושא זה ולא בנושאים כלליים או קשורים.",
         },
     ]
 
@@ -813,13 +932,76 @@ def perform_search(query: str) -> list[dict]:
                     # וידוא שהכותרת בעברית - אם לא, נתרגם אותה
                     hebrew_title = translate_title_to_hebrew(title)
                     
-                    results.append({
+                    # יצירת תוצאה זמנית לבדיקת רלוונטיות
+                    temp_result = {
                         'title': hebrew_title,
                         'url': url,
                         'summary': summary if summary else f"מקור מידע זמין - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
-                    })
+                    }
+                    
+                    # בדיקת רלוונטיות לפני הוספה
+                    if is_relevant_result(temp_result, query):
+                        results.append(temp_result)
+                    else:
+                        logger.info(f"Filtered out irrelevant result: {hebrew_title[:50]}")
+                        continue
             
-            return results
+            # אם אין מספיק תוצאות רלוונטיות, נסה חיפוש נוסף עם שאילתה מעודנת
+            if len(results) < 3:
+                logger.info(f"Only {len(results)} relevant results found, trying refined search...")
+                try:
+                    refined_query = f'"{query}" עדכונים חדשים מידע אחרון'
+                    refined_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "אתה עוזר חיפוש מומחה. עליך למצוא מידע ספציפי ועדכני על הנושא המבוקש. "
+                                "החזר רק מערך JSON של 3-5 תוצאות נוספות עם השדות: 'title', 'url', 'summary'. "
+                                "התמקד במקורות אמינים ועדכניים הקשורים ישירות לנושא."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"מצא מידע נוסף על: {refined_query}",
+                        },
+                    ]
+                    
+                    refined_response = client.chat.completions.create(
+                        model="sonar-pro",
+                        messages=refined_messages,
+                    )
+                    refined_content = refined_response.choices[0].message.content
+                    refined_results_json = json.loads(refined_content)
+                    
+                    for item in refined_results_json:
+                        if isinstance(item, dict) and 'title' in item and 'url' in item and len(results) < 7:
+                            url = item.get('url', '').strip()
+                            if not url.startswith(('http://', 'https://')):
+                                continue
+                            if any(char in url for char in [' ', '\n', '\r', '\t']):
+                                continue
+                            
+                            title = item.get('title', 'ללא כותרת').strip()
+                            summary = item.get('summary', '').strip()
+                            hebrew_title = translate_title_to_hebrew(title)
+                            
+                            temp_result = {
+                                'title': hebrew_title,
+                                'url': url,
+                                'summary': summary if summary else f"מקור מידע נוסף - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
+                            }
+                            
+                            if is_relevant_result(temp_result, query):
+                                results.append(temp_result)
+                                
+                except Exception as refined_e:
+                    logger.warning(f"Refined search failed: {refined_e}")
+             
+            # דירוג התוצאות לפי רלוונטיות
+            ranked_results = rank_results_by_relevance(results, query)
+            
+            logger.info(f"Search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+            return ranked_results
             
         except json.JSONDecodeError:
             # אם JSON לא תקין, ננסה לפרסר כמרקדאון (fallback)
@@ -836,13 +1018,25 @@ def perform_search(query: str) -> list[dict]:
                     
                 title_clean = title.strip()
                 hebrew_title = translate_title_to_hebrew(title_clean)
-                results.append({
+                
+                # יצירת תוצאה זמנית לבדיקת רלוונטיות
+                temp_result = {
                     'title': hebrew_title,
                     'url': link,
                     'summary': f"מקור מידע זמין - {hebrew_title[:50]}{'...' if len(hebrew_title) > 50 else ''}"
-                })
+                }
+                
+                # בדיקת רלוונטיות לפני הוספה
+                if is_relevant_result(temp_result, query):
+                    results.append(temp_result)
+                else:
+                    logger.info(f"Filtered out irrelevant fallback result: {hebrew_title[:50]}")
             
-            return results
+            # דירוג התוצאות לפי רלוונטיות גם בfallback
+            ranked_results = rank_results_by_relevance(results, query)
+            
+            logger.info(f"Fallback search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+            return ranked_results
 
     except Exception as e:
         logger.error(f"An error occurred while calling the Perplexity API: {e}")
