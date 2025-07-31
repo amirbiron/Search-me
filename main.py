@@ -55,6 +55,9 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
 
+# לוג משתני סביבה חשובים
+logger.info(f"Environment variables loaded - ADMIN_ID: {ADMIN_ID}, BOT_TOKEN: {'SET' if BOT_TOKEN else 'NOT SET'}")
+
 # קבועים
 MONTHLY_LIMIT = 200  # מגבלת שאילתות חודשית
 DEFAULT_PROVIDER = "perplexity"
@@ -800,8 +803,13 @@ def get_main_menu_keyboard(user_id=None):
     ]
     
     # הוספת כפתור אדמין אם המשתמש הוא אדמין
+    logger.info(f"Checking admin access: user_id={user_id}, ADMIN_ID={ADMIN_ID}, match={user_id == ADMIN_ID}")
     if user_id == ADMIN_ID:
+        logger.info("Adding admin button for recent users")
         keyboard.append([InlineKeyboardButton("👥 משתמשים אחרונים", callback_data="recent_users")])
+    else:
+        # לוג זמני לדיבוג - הסר אחרי שהבעיה תיפתר
+        logger.info(f"User {user_id} is not admin (ADMIN_ID={ADMIN_ID})")
     
     return InlineKeyboardMarkup(keyboard)
 
@@ -1372,6 +1380,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # הצגת עזרה
             await show_help(query)
             
+        elif data == "recent_users":
+            # הצגת משתמשים אחרונים (רק לאדמין)
+            if user_id == ADMIN_ID:
+                await show_recent_users(query)
+            else:
+                await query.edit_message_text(
+                    "❌ אין לך הרשאה לצפות במידע זה.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+                )
+            
         elif data.startswith("freq_"):
             # בחירת תדירות לנושא חדש
             if data == "freq_5min":
@@ -1447,6 +1465,55 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in button callback: {e}")
         await query.edit_message_text(
             "❌ אירעה שגיאה. אנא נסו שוב.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+
+async def show_recent_users(query):
+    """הצגת משתמשים אחרונים (רק לאדמין)"""
+    try:
+        recent_users = db.get_recent_users_activity()
+        
+        if not recent_users:
+            message = """
+👥 **משתמשים אחרונים**
+
+📭 אין פעילות השבוע
+לא נמצאו משתמשים שהיו פעילים בשבוע האחרון.
+"""
+        else:
+            message = "👥 **משתמשים אחרונים (שבוע אחרון)**\n\n"
+            
+            for i, user in enumerate(recent_users[:10], 1):  # מגביל ל-10 משתמשים
+                username = user['username']
+                user_id = user['user_id']
+                topics_added = user['topics_added']
+                usage_count = user['usage_count']
+                activity_dates = user['activity_dates']
+                
+                # פורמט תאריכי פעילות
+                if activity_dates:
+                    last_activity = max(activity_dates)
+                    activity_text = f"📅 פעילות אחרונה: {last_activity}"
+                else:
+                    activity_text = "📅 ללא פעילות השבוע"
+                
+                message += f"""
+{i}. **{username}** (ID: {user_id})
+   📝 נושאים נוספו: {topics_added}
+   🔍 שימוש החודש: {usage_count}
+   {activity_text}
+"""
+        
+        await query.edit_message_text(
+            message, 
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+        
+    except Exception as e:
+        logger.error(f"Error showing recent users: {e}")
+        await query.edit_message_text(
+            "❌ שגיאה בטעינת רשימת המשתמשים.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
         )
 
