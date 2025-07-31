@@ -1016,14 +1016,20 @@ def run_flask():
 
 def get_main_menu_keyboard(user_id=None):
     """יצירת תפריט הכפתורים הראשי"""
-    keyboard = [
+    keyboard = []
+    
+    # הוספת כפתור פקודות מהירות רק לאדמין
+    if user_id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("☰ פקודות מהירות", callback_data="quick_commands")])
+    
+    keyboard.extend([
         [InlineKeyboardButton("📌 הוסף נושא חדש", callback_data="add_topic")],
         [InlineKeyboardButton("📋 הצג רשימת נושאים", callback_data="list_topics")],
         [InlineKeyboardButton("⏸️ השבת מעקב", callback_data="pause_tracking"),
          InlineKeyboardButton("▶️ הפעל מחדש", callback_data="resume_tracking")],
         [InlineKeyboardButton("📊 שימוש נוכחי", callback_data="usage_stats"),
          InlineKeyboardButton("❓ עזרה", callback_data="help")]
-    ]
+    ])
     
     # הוספת כפתור אדמין אם המשתמש הוא אדמין
     logger.info(f"Checking admin access: user_id={user_id}, ADMIN_ID={ADMIN_ID}, match={user_id == ADMIN_ID}")
@@ -1033,6 +1039,16 @@ def get_main_menu_keyboard(user_id=None):
     else:
         # לוג זמני לדיבוג - הסר אחרי שהבעיה תיפתר
         logger.info(f"User {user_id} is not admin (ADMIN_ID={ADMIN_ID})")
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def get_quick_commands_keyboard(user_id=None):
+    """יצירת תפריט פקודות מהירות (רק לאדמין)"""
+    keyboard = [
+        [InlineKeyboardButton("👤 /whoami - מידע עליי", callback_data="run_whoami")],
+        [InlineKeyboardButton("👥 /recent_users - משתמשים אחרונים", callback_data="run_recent_users")],
+        [InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]
+    ]
     
     return InlineKeyboardMarkup(keyboard)
 
@@ -1612,6 +1628,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # הצגת עזרה
             await show_help(query)
             
+        elif data == "quick_commands":
+            # הצגת תפריט פקודות מהירות
+            await query.edit_message_text(
+                "☰ **פקודות מהירות**\n\nבחרו פקודה להרצה מהירה:",
+                reply_markup=get_quick_commands_keyboard(user_id)
+            )
+            
+        elif data == "run_whoami":
+            # הרצת פקודת /whoami
+            await run_whoami_inline(query, user_id)
+            
+        elif data == "run_recent_users":
+            # הרצת פקודת /recent_users (רק לאדמין)
+            if user_id == ADMIN_ID:
+                await show_recent_users(query, from_quick_commands=True)
+            else:
+                await query.edit_message_text(
+                    "❌ אין לך הרשאה לפקודה זו.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לפקודות מהירות", callback_data="quick_commands")]])
+                )
+            
         elif data == "recent_users":
             # הצגת משתמשים אחרונים (רק לאדמין)
             if user_id == ADMIN_ID:
@@ -1796,7 +1833,42 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message, parse_mode='Markdown')
 
-async def show_recent_users(query):
+async def run_whoami_inline(query, user_id):
+    """הרצת פקודת /whoami בתפריט אינליין"""
+    try:
+        user = query.from_user
+        username = user.username or "לא מוגדר"
+        first_name = user.first_name or "לא מוגדר"
+        
+        is_admin = user_id == ADMIN_ID
+        admin_status = "✅ כן" if is_admin else "❌ לא"
+        
+        message = f"""
+👤 **פרטי המשתמש**
+
+🆔 **User ID:** `{user_id}`
+👤 **שם משתמש:** @{username}
+📝 **שם פרטי:** {first_name}
+🔑 **הרשאות אדמין:** {admin_status}
+
+ℹ️ **מידע נוסף:**
+• ADMIN_ID המוגדר במערכת: `{ADMIN_ID}`
+• כדי לקבל הרשאות אדמין, יש להגדיר את ADMIN_ID ל-{user_id}
+"""
+        
+        await query.edit_message_text(
+            message, 
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לפקודות מהירות", callback_data="quick_commands")]])
+        )
+    except Exception as e:
+        logger.error(f"Error in run_whoami_inline: {e}")
+        await query.edit_message_text(
+            "❌ שגיאה בהצגת פרטי המשתמש",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+        )
+
+async def show_recent_users(query, from_quick_commands=False):
     """הצגת משתמשים אחרונים (רק לאדמין)"""
     try:
         recent_users = db.get_recent_users_activity()
@@ -1852,10 +1924,13 @@ async def show_recent_users(query):
    {activity_text}
 """
         
+        back_button_text = "🔙 חזרה לפקודות מהירות" if from_quick_commands else "🔙 חזרה לתפריט"
+        back_button_callback = "quick_commands" if from_quick_commands else "main_menu"
+        
         await query.edit_message_text(
             message, 
             parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(back_button_text, callback_data=back_button_callback)]])
         )
         
     except Exception as e:
