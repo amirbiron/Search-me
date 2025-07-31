@@ -1200,6 +1200,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ▶️ **הפעלת התראות מחדש:**
 /resume
 
+📊 **סטטיסטיקות שימוש:**
+/stats
+
+👥 **משתמשים אחרונים (אדמין בלבד):**
+/recent_users
+
+🆔 **מידע אישי:**
+/whoami
+
 🔍 **איך זה עובד?**
 • הבוט בודק את הנושאים שלכם כל 24 שעות
 • משתמש ב-Perplexity בינה מלאכותית עם גלישה לחיפוש באינטרנט
@@ -1691,6 +1700,102 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
         )
 
+async def recent_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /recent_users - הצגת משתמשים אחרונים (רק לאדמין)"""
+    user_id = update.effective_user.id
+    
+    # בדיקה שהמשתמש הוא אדמין
+    if user_id != ADMIN_ID:
+        await update.message.reply_text(f"❌ פקודה זו זמינה רק למנהל המערכת.\n\nה-ID שלך הוא: `{user_id}`\nADMIN_ID המוגדר כרגע: `{ADMIN_ID}`", parse_mode='Markdown')
+        return
+    
+    try:
+        recent_users = db.get_recent_users_activity()
+        
+        if not recent_users:
+            message = """
+👥 **משתמשים אחרונים**
+
+📭 אין פעילות השבוע
+לא נמצאו משתמשים שהיו פעילים בשבוע האחרון.
+"""
+        else:
+            total_weekly_users = len(recent_users)
+            total_topics_added = sum(user['topics_added'] for user in recent_users)
+            total_monthly_usage = sum(user['usage_count'] for user in recent_users)
+            
+            message = f"""👥 **משתמשים אחרונים (שבוע אחרון)**
+
+📊 **סיכום כללי:**
+• 👤 סה"כ משתמשים פעילים השבוע: **{total_weekly_users}**
+• 📝 סה"כ נושאים נוספו השבוע: **{total_topics_added}**
+• 🔍 סה"כ שימוש החודש: **{total_monthly_usage}**
+
+📋 **פירוט משתמשים:**
+
+"""
+            
+            for i, user in enumerate(recent_users[:10], 1):  # מגביל ל-10 משתמשים
+                username = user['username']
+                user_id = user['user_id']
+                topics_added = user['topics_added']
+                usage_count = user['usage_count']
+                activity_dates = user['activity_dates']
+                
+                # פורמט תאריכי פעילות
+                if activity_dates:
+                    unique_dates = list(set(activity_dates))
+                    unique_dates.sort(key=lambda x: datetime.strptime(x, "%d/%m/%Y"), reverse=True)
+                    last_activity = unique_dates[0]
+                    activity_days = len(unique_dates)
+                    
+                    if activity_days == 1:
+                        activity_text = f"📅 פעיל ב: {last_activity}"
+                    else:
+                        activity_text = f"📅 פעילות אחרונה: {last_activity} ({activity_days} ימים)"
+                else:
+                    activity_text = "📅 ללא פעילות השבוע"
+                
+                message += f"""
+{i}. **{username}** (ID: {user_id})
+   📝 נושאים השבוע: {topics_added}
+   🔍 שימוש החודש: {usage_count}
+   {activity_text}
+"""
+        
+        await update.message.reply_text(
+            message, 
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error showing recent users: {e}")
+        await update.message.reply_text("❌ שגיאה בטעינת רשימת המשתמשים.")
+
+async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /whoami - הצגת מידע על המשתמש"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "לא מוגדר"
+    first_name = update.effective_user.first_name or "לא מוגדר"
+    
+    is_admin = user_id == ADMIN_ID
+    admin_status = "✅ כן" if is_admin else "❌ לא"
+    
+    message = f"""
+👤 **פרטי המשתמש**
+
+🆔 **User ID:** `{user_id}`
+👤 **שם משתמש:** @{username}
+📝 **שם פרטי:** {first_name}
+🔑 **הרשאות אדמין:** {admin_status}
+
+ℹ️ **מידע נוסף:**
+• ADMIN_ID המוגדר במערכת: `{ADMIN_ID}`
+• כדי לקבל הרשאות אדמין, יש להגדיר את ADMIN_ID ל-{user_id}
+"""
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
 async def show_recent_users(query):
     """הצגת משתמשים אחרונים (רק לאדמין)"""
     try:
@@ -1913,6 +2018,8 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("test_search", test_search_command))
+    application.add_handler(CommandHandler("recent_users", recent_users_command))
+    application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
