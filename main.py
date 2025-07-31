@@ -2190,44 +2190,6 @@ async def show_edit_topic_menu(query, user_id, topic_id):
         [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
     ]
     
-    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard)        )
-
-async def show_edit_topic_menu(query, user_id, topic_id):
-    """הצגת תפריט עריכת נושא"""
-    # קבלת פרטי הנושא
-    topics = db.get_user_topics(user_id)
-    topic = next((t for t in topics if str(t['id']) == str(topic_id)), None)
-    
-    if not topic:
-        await query.edit_message_text(
-            "❌ הנושא לא נמצא.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 חזרה לתפריט", callback_data="main_menu")]])
-        )
-        return
-    
-    # הצגת פרטי הנושא הנוכחיים
-    freq_text = {
-        6: "כל 6 שעות",
-        12: "כל 12 שעות", 
-        24: "כל 24 שעות",
-        48: "כל 48 שעות",
-        168: "אחת לשבוע"
-    }.get(topic['check_interval'], f"כל {topic['check_interval']} שעות")
-    
-    message = f"""✏️ עריכת נושא מעקב
-
-📝 נושא נוכחי: {topic['topic']}
-⏰ תדירות נוכחית: {freq_text}
-
-מה תרצו לערוך?"""
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 שנה את הטקסט", callback_data=f"edit_text_{topic_id}")],
-        [InlineKeyboardButton("⏰ שנה תדירות", callback_data=f"edit_freq_{topic_id}")],
-        [InlineKeyboardButton("🔙 חזרה לרשימה", callback_data="show_topics")],
-        [InlineKeyboardButton("🏠 תפריט ראשי", callback_data="main_menu")]
-    ]
-    
     await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_topics_list(query, user_id):
