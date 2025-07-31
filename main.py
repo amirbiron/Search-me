@@ -1084,6 +1084,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
 ⏳ נותרו לך {usage_info['remaining']} בדיקות החודש
 
+📞 לכל תקלה או ביקורת ניתן לפנות ל-@moominAmir בטלגרם
+
 בחרו פעולה מהתפריט למטה:
 """
     
@@ -1587,6 +1589,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 **מגבלת השימוש החודשית:**
 🔍 השתמשת ב-{usage_info['current_usage']} מתוך {usage_info['monthly_limit']} בדיקות
 ⏳ נותרו לך {usage_info['remaining']} בדיקות החודש
+
+📞 לכל תקלה או ביקורת ניתן לפנות ל-@moominAmir בטלגרם
 
 בחרו פעולה:
 """
