@@ -22,7 +22,7 @@ services:
       - key: MONGODB_DB_NAME
         value: watchbot
       - key: USE_MONGODB
-        value: false
+        value: true
     disk:
       name: watchbot-data
       mountPath: /var/data

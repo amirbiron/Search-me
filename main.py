@@ -1,6 +1,6 @@
 from openai import OpenAI
 import os, subprocess
-VERSION = "2025-01-27-14:30"  # עדכן בכל דיפלוי
+VERSION = "2025-01-27-15:00"  # עדכן בכל דיפלוי - תיקון MongoDB persistence
 print(f"[BOOT] VERSION={VERSION}")
 print(f"[BOOT] RENDER_GIT_COMMIT={os.getenv('RENDER_GIT_COMMIT')}")
 try:
@@ -618,6 +618,56 @@ def decrement_credits(user_id: int, used: int = 1) -> int:
         conn.close()
         
         return max(MONTHLY_LIMIT - new_usage_count, 0)
+    
+    def get_stats(self) -> Dict[str, int]:
+        """קבלת סטטיסטיקות כלליות - גרסת SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            # ספירת משתמשים
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total_users = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")
+            active_users = cursor.fetchone()[0]
+            
+            # ספירת נושאים
+            cursor.execute("SELECT COUNT(*) FROM watch_topics WHERE is_active = 1")
+            active_topics = cursor.fetchone()[0]
+            
+            # ספירת תוצאות
+            cursor.execute("SELECT COUNT(*) FROM found_results")
+            total_results = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM found_results WHERE found_at > datetime('now', '-24 hours')")
+            results_today = cursor.fetchone()[0]
+            
+            # סטטיסטיקות שימוש חודשיות
+            cursor.execute("SELECT COUNT(*), SUM(usage_count) FROM usage_stats WHERE month = ?", (current_month,))
+            usage_stats = cursor.fetchone()
+            users_with_usage = usage_stats[0] if usage_stats[0] else 0
+            total_usage_this_month = usage_stats[1] if usage_stats[1] else 0
+            
+            # משתמשים שהגיעו למגבלה
+            cursor.execute("SELECT COUNT(*) FROM usage_stats WHERE month = ? AND usage_count >= ?", (current_month, MONTHLY_LIMIT))
+            users_at_limit = cursor.fetchone()[0]
+            
+            return {
+                "total_users": total_users,
+                "active_users": active_users,
+                "users_with_usage": users_with_usage,
+                "users_at_limit": users_at_limit,
+                "active_topics": active_topics,
+                "total_results": total_results,
+                "results_today": results_today,
+                "total_usage_this_month": total_usage_this_month
+            }
+            
+        finally:
+            conn.close()
 
 def run_topic_search(topic) -> List[Dict[str, str]]:
     """Main search function that uses Perplexity - Hebrew only output"""
@@ -1621,6 +1671,72 @@ class SmartWatcher:
         except Exception as e:
             logger.error(f"Error updating topic frequency: {e}")
             return False
+    
+    def get_stats(self) -> Dict[str, int]:
+        """קבלת סטטיסטיקות כלליות - גרסת MongoDB"""
+        try:
+            current_month = datetime.now().strftime("%Y-%m")
+            
+            # ספירת משתמשים
+            total_users = self.users_collection.count_documents({})
+            active_users = self.users_collection.count_documents({"is_active": True})
+            
+            # ספירת נושאים
+            active_topics = self.watch_topics_collection.count_documents({"is_active": True})
+            
+            # ספירת תוצאות
+            total_results = self.found_results_collection.count_documents({})
+            
+            # תוצאות מהיום האחרון
+            yesterday = datetime.now() - timedelta(hours=24)
+            results_today = self.found_results_collection.count_documents({
+                "found_at": {"$gte": yesterday}
+            })
+            
+            # סטטיסטיקות שימוש חודשיות
+            usage_pipeline = [
+                {"$match": {"month": current_month}},
+                {"$group": {
+                    "_id": None,
+                    "users_with_usage": {"$sum": 1},
+                    "total_usage_this_month": {"$sum": "$usage_count"},
+                    "users_at_limit": {
+                        "$sum": {"$cond": [{"$gte": ["$usage_count", MONTHLY_LIMIT]}, 1, 0]}
+                    }
+                }}
+            ]
+            
+            usage_stats = list(self.usage_stats_collection.aggregate(usage_pipeline))
+            if usage_stats:
+                users_with_usage = usage_stats[0].get("users_with_usage", 0)
+                total_usage_this_month = usage_stats[0].get("total_usage_this_month", 0)
+                users_at_limit = usage_stats[0].get("users_at_limit", 0)
+            else:
+                users_with_usage = total_usage_this_month = users_at_limit = 0
+            
+            return {
+                "total_users": total_users,
+                "active_users": active_users,
+                "users_with_usage": users_with_usage,
+                "users_at_limit": users_at_limit,
+                "active_topics": active_topics,
+                "total_results": total_results,
+                "results_today": results_today,
+                "total_usage_this_month": total_usage_this_month
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting stats from MongoDB: {e}")
+            return {
+                "total_users": 0,
+                "active_users": 0,
+                "users_with_usage": 0,
+                "users_at_limit": 0,
+                "active_topics": 0,
+                "total_results": 0,
+                "results_today": 0,
+                "total_usage_this_month": 0
+            }
 
 # יצירת אובייקטי המערכת
 if USE_MONGODB:
@@ -1769,7 +1885,11 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     topic = ' '.join(context.args)
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
+    
+    # הוספת המשתמש למאגר הנתונים (אם לא קיים)
+    db.add_user(user_id, user.username)
     
     # הוספה למסד הנתונים
     topic_id = db.add_watch_topic(user_id, topic)
@@ -1793,7 +1913,12 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת רשימת נושאים"""
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
+    
+    # הוספת המשתמש למאגר הנתונים (אם לא קיים)
+    db.add_user(user_id, user.username)
+    
     topics = db.get_user_topics(user_id)
     
     if not topics:
@@ -1927,39 +2052,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    # קבלת סטטיסטיקות מבסיס הנתונים
+    stats = db.get_stats()
     
-    # ספירת משתמשים
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")
-    active_users = cursor.fetchone()[0]
-    
-    # ספירת נושאים
-    cursor.execute("SELECT COUNT(*) FROM watch_topics WHERE is_active = 1")
-    active_topics = cursor.fetchone()[0]
-    
-    # ספירת תוצאות
-    cursor.execute("SELECT COUNT(*) FROM found_results")
-    total_results = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM found_results WHERE found_at > datetime('now', '-24 hours')")
-    results_today = cursor.fetchone()[0]
-    
-    # סטטיסטיקות שימוש חודשיות
-    current_month = datetime.now().strftime("%Y-%m")
-    cursor.execute("SELECT COUNT(*), SUM(usage_count) FROM usage_stats WHERE month = ?", (current_month,))
-    usage_stats = cursor.fetchone()
-    users_with_usage = usage_stats[0] if usage_stats[0] else 0
-    total_usage_this_month = usage_stats[1] if usage_stats[1] else 0
-    
-    # משתמשים שהגיעו למגבלה
-    cursor.execute("SELECT COUNT(*) FROM usage_stats WHERE month = ? AND usage_count >= ?", (current_month, MONTHLY_LIMIT))
-    users_at_limit = cursor.fetchone()[0]
-    
-    conn.close()
+    total_users = stats["total_users"]
+    active_users = stats["active_users"]
+    users_with_usage = stats["users_with_usage"]
+    users_at_limit = stats["users_at_limit"]
+    active_topics = stats["active_topics"]
+    total_results = stats["total_results"]
+    results_today = stats["results_today"]
+    total_usage_this_month = stats["total_usage_this_month"]
     
     stats_message = f"""
 📊 **סטטיסטיקות הבוט**
@@ -2251,8 +2354,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
+    user = query.from_user
+    user_id = user.id
     data = query.data
+    
+    # הוספת המשתמש למאגר הנתונים (אם לא קיים)
+    db.add_user(user_id, user.username)
     
     try:
         if data == "main_menu":
@@ -2553,9 +2660,13 @@ async def recent_users_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת /whoami - הצגת מידע על המשתמש"""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "לא מוגדר"
-    first_name = update.effective_user.first_name or "לא מוגדר"
+    user = update.effective_user
+    user_id = user.id
+    username = user.username or "לא מוגדר"
+    first_name = user.first_name or "לא מוגדר"
+    
+    # הוספת המשתמש למאגר הנתונים (אם לא קיים)
+    db.add_user(user_id, username)
     
     is_admin = user_id == ADMIN_ID
     admin_status = "✅ כן" if is_admin else "❌ לא"
