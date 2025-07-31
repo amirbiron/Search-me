@@ -18,6 +18,8 @@ from typing import List, Dict, Any
 import asyncio
 import re
 import requests
+from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
@@ -54,6 +56,10 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 DB_PATH = os.getenv('DB_PATH', '/var/data/watchbot.db')
 PORT = int(os.getenv('PORT', 5000))
+
+# MongoDB configuration
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+MONGODB_DB_NAME = os.getenv('MONGODB_DB_NAME', 'watchbot')
 
 # לוג משתני סביבה חשובים
 logger.info(f"Environment variables loaded - ADMIN_ID: {ADMIN_ID}, BOT_TOKEN: {'SET' if BOT_TOKEN else 'NOT SET'}")
