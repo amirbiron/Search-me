@@ -755,7 +755,7 @@ def validate_url(url: str, timeout: int = 5) -> bool:
         return response.status_code in [200, 206, 301, 302, 303, 307, 308]
         
     except (requests.RequestException, requests.Timeout, Exception) as e:
-        # Removed noisy URL validation debug log
+        logger.debug(f"URL validation failed for {url}: {e}")
         return False
 
 def is_relevant_result(result: dict, query: str) -> bool:
@@ -787,7 +787,7 @@ def is_relevant_result(result: dict, query: str) -> bool:
     
     # אם לא מבקשים וידאו אבל התוצאה היא וידאו - דחה
     if not video_request and any(pattern in url for pattern in irrelevant_patterns[:1]):  # רק יוטיוב
-                    # Removed noisy video filter debug log
+                    logger.debug(f"Filtered out video result when not requested: {title[:50]}")
         return False
     
     # בדיקת התאמה בין סוג השאילתה לסוג התוכן
@@ -799,14 +799,14 @@ def is_relevant_result(result: dict, query: str) -> bool:
             # בדוק אם יש גם מילים רלוונטיות לעדכונים/תיקונים
             relevant_words = ['עדכון', 'גרסה', 'תיקון', 'באג', 'פתרון', 'update', 'version', 'fix', 'bug', 'changelog', 'release notes']
             if not any(word in title + summary for word in relevant_words):
-                # Removed noisy tutorial filter debug log
+                logger.debug(f"Filtered out generic tutorial for update/troubleshooting query: {title[:50]}")
                 return False
         
         # סינון נוסף לעדכוני תוכנה - דחיית מדריכי וידאו כשמחפשים עדכונים
         if query_intent['type'] == 'software_update':
             video_indicators = ['וידאו', 'סרטון', 'צפייה', 'video', 'watch', 'tutorial video']
             if any(indicator in title + summary for indicator in video_indicators):
-                # Removed noisy video tutorial filter debug log
+                logger.debug(f"Filtered out video tutorial for software update query: {title[:50]}")
                 return False
     
     # מילים שצריך להתעלם מהן בבדיקת רלוונטיות (מילות עצירה)
@@ -858,7 +858,7 @@ def is_relevant_result(result: dict, query: str) -> bool:
     
     # לוגינג לדיבוג
     if not is_relevant:
-        # Removed noisy relevance check debug log
+        logger.debug(f"Relevance check failed: query='{query}', title='{title[:50]}', score={total_score}, threshold={relevance_threshold}")
     
     return is_relevant
 
@@ -1184,7 +1184,7 @@ def perform_search(query: str) -> list[dict]:
                     
                     # בדיקת נגישות הקישור (עם timeout קצר)
                     if not validate_url(url, timeout=3):
-                        # Removed noisy URL accessibility debug log
+                        logger.debug(f"Skipping inaccessible URL: {url}")
                         continue
                     
                     title = item.get('title', 'ללא כותרת').strip()
@@ -1204,12 +1204,12 @@ def perform_search(query: str) -> list[dict]:
                     if is_relevant_result(temp_result, query):
                         results.append(temp_result)
                     else:
-                        # Removed noisy irrelevant result filtering log
+                        logger.info(f"Filtered out irrelevant result: {hebrew_title[:50]}")
                         continue
             
             # אם אין מספיק תוצאות רלוונטיות, נסה חיפוש נוסף עם שאילתה מעודנת
             if len(results) < 3:
-                # Trying refined search (reduced logging noise)
+                logger.info(f"Only {len(results)} relevant results found, trying refined search...")
                 try:
                     refined_query = f'"{query}" עדכונים חדשים מידע אחרון'
                     refined_messages = [
@@ -1244,7 +1244,7 @@ def perform_search(query: str) -> list[dict]:
                             
                             # בדיקת נגישות הקישור גם בחיפוש המעודן
                             if not validate_url(url, timeout=3):
-                                # Removed noisy refined URL accessibility debug log
+                                logger.debug(f"Skipping inaccessible refined URL: {url}")
                                 continue
                             
                             title = item.get('title', 'ללא כותרת').strip()
@@ -1266,7 +1266,7 @@ def perform_search(query: str) -> list[dict]:
             # דירוג התוצאות לפי רלוונטיות
             ranked_results = rank_results_by_relevance(results, query)
             
-            # Search completed (reduced logging noise)
+            logger.info(f"Search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}')")
             return ranked_results
             
         except json.JSONDecodeError:
@@ -1284,7 +1284,7 @@ def perform_search(query: str) -> list[dict]:
                 
                 # בדיקת נגישות הקישור גם בfallback
                 if not validate_url(link, timeout=3):
-                    # Removed noisy fallback URL accessibility debug log
+                    logger.debug(f"Skipping inaccessible fallback URL: {link}")
                     continue
                     
                 title_clean = title.strip()
@@ -1301,12 +1301,12 @@ def perform_search(query: str) -> list[dict]:
                 if is_relevant_result(temp_result, query):
                     results.append(temp_result)
                 else:
-                    # Removed noisy irrelevant fallback result log
+                    logger.info(f"Filtered out irrelevant fallback result: {hebrew_title[:50]}")
             
             # דירוג התוצאות לפי רלוונטיות גם בfallback
             ranked_results = rank_results_by_relevance(results, query)
             
-            # Fallback search completed (reduced logging noise)
+            logger.info(f"Fallback search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}')")
             return ranked_results
 
     except Exception as e:
