@@ -28,6 +28,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from telegram.constants import ParseMode
 from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from activity_reporter import create_reporter
 
 # Future-proof LinkPreviewOptions handling for PTB compatibility
 try:
@@ -73,6 +74,12 @@ DEFAULT_PROVIDER = "perplexity"
 
 # יצירת ספריית נתונים אם לא קיימת
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+reporter = create_reporter(
+    mongodb_uri="mongodb+srv://mumin:M43M2TFgLfGvhBwY@muminai.tm6x81b.mongodb.net/?retryWrites=true&w=majority&appName=muminAI",
+    service_id="srv-d202d2i4d50c73b7u3pg",
+    service_name="SearchMe"
+)
 
 class WatchBotDB:
     """מחלקה לניהול בסיס הנתונים"""
@@ -1854,6 +1861,7 @@ async def show_frequency_selection(query, user_id, topic_id, is_edit=False):
 # פקודות הבוט
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת התחלה"""
+    reporter.report_activity(update.effective_user.id)
     user = update.effective_user
     db.add_user(user.id, user.username)
     
@@ -1880,6 +1888,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הוספת נושא למעקב"""
+    reporter.report_activity(update.effective_user.id)
     if not context.args:
         await update.message.reply_text("❌ אנא ציינו נושא למעקב.\nדוגמה: /watch גלקסי טאב S11 אולטרה")
         return
@@ -1913,6 +1922,7 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת רשימת נושאים"""
+    reporter.report_activity(update.effective_user.id)
     user = update.effective_user
     user_id = user.id
     
@@ -1970,6 +1980,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הסרת נושא"""
+    reporter.report_activity(update.effective_user.id)
     if not context.args:
         await update.message.reply_text("❌ אנא ציינו נושא או מזהה להסרה.\nדוגמה: /remove 1 או /remove גלקסי טאב S11 אולטרה")
         return
@@ -1986,18 +1997,21 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת השבתת התראות"""
+    reporter.report_activity(update.effective_user.id)
     user_id = update.effective_user.id
     db.toggle_user_status(user_id, False)
     await update.message.reply_text("⏸️ ההתראות הושבתו. השתמשו ב-/resume להפעלה מחדש.")
 
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת הפעלת התראות"""
+    reporter.report_activity(update.effective_user.id)
     user_id = update.effective_user.id
     db.toggle_user_status(user_id, True)
     await update.message.reply_text("▶️ ההתראות הופעלו מחדש!")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת עזרה"""
+    reporter.report_activity(update.effective_user.id)
     help_text = """
 🤖 מדריך השימוש בבוט המעקב החכם
 
@@ -2049,6 +2063,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # פקודות אדמין
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """סטטיסטיקות (אדמין בלבד)"""
+    reporter.report_activity(update.effective_user.id)
     if update.effective_user.id != ADMIN_ID:
         return
     
@@ -2091,6 +2106,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def test_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת בדיקה מהירה (אדמין בלבד)"""
+    reporter.report_activity(update.effective_user.id)
     if update.effective_user.id != ADMIN_ID:
         return
     
@@ -2351,6 +2367,7 @@ user_states = {}
 # פונקציות callback
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בלחיצות כפתורים"""
+    reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await query.answer()
     
@@ -2588,6 +2605,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recent_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת /recent_users - הצגת משתמשים אחרונים (רק לאדמין)"""
+    reporter.report_activity(update.effective_user.id)
     user_id = update.effective_user.id
     
     # בדיקה שהמשתמש הוא אדמין
@@ -2660,6 +2678,7 @@ async def recent_users_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת /whoami - הצגת מידע על המשתמש"""
+    reporter.report_activity(update.effective_user.id)
     user = update.effective_user
     user_id = user.id
     username = user.username or "לא מוגדר"
@@ -2948,6 +2967,7 @@ async def show_help(query):
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בהודעות טקסט"""
+    reporter.report_activity(update.effective_user.id)
     user_id = update.effective_user.id
     text = update.message.text
     
