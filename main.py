@@ -38,16 +38,16 @@ except Exception:
     # PTB 20.x fallback
     _LP_KW = {"disable_web_page_preview": True}
 
-# הגדרת לוגינג
+# הגדרת לוגינג - default to INFO level to reduce noise
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "DEBUG"),
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 # הפחתת רעש מספריות רועשות - quieter logs
-for noisy in ("httpcore", "httpx", "urllib3", "apscheduler", "werkzeug", "telegram"):
-    logging.getLogger(noisy).setLevel(logging.INFO)
+for noisy in ("httpcore", "httpx", "urllib3", "apscheduler", "werkzeug", "telegram", "requests", "openai", "pymongo"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 
 # --- הגדרות ה-API של Perplexity ---
 API_KEY = os.getenv("PERPLEXITY_API_KEY")
@@ -561,8 +561,9 @@ class WatchBotDB:
         return self.increment_usage(user_id)
 
 def log_search(provider: str, topic_id: int, query: str):
-    """Log search with trimmed query"""
-    logger.info("[SEARCH] provider=%s | topic_id=%s | query='%s'", provider, topic_id, query[:200])
+    """Log search with trimmed query - reduced logging"""
+    # Removed frequent search logging to reduce noise
+    pass
 
 def decrement_credits(user_id: int, used: int = 1) -> int:
     """Atomic-like function to decrement credits and return new value"""
@@ -675,7 +676,7 @@ def run_topic_search(topic) -> List[Dict[str, str]]:
     used = 1
     
     log_search(provider, topic.id, topic.query)
-    logger.info("🔍 Calling Perplexity for topic: %s", topic.query)
+    # Calling Perplexity API (reduced logging noise)
     
     try:
         perplexity_results = perform_search(topic.query)
@@ -685,7 +686,7 @@ def run_topic_search(topic) -> List[Dict[str, str]]:
         # הפונקציה perform_search כבר מחזירה את הפורמט הנכון עם סיכומים
         results = perplexity_results
         
-        logger.info("✅ Perplexity success: %d results", len(results))
+        # Perplexity API success (reduced logging noise)
         return results
     except Exception as e:
         logger.error("Perplexity search failed for topic %s: %s", topic.id, e)
@@ -695,7 +696,7 @@ def run_topic_search(topic) -> List[Dict[str, str]]:
         try:
             prev = db.get_user_usage(topic.user_id)['remaining']
             new_val = decrement_credits(topic.user_id, used)
-            logger.info("Credits decremented: -%d | provider=%s | %d->%d", used, provider, prev, new_val)
+            # Removed frequent credit logging to reduce noise
         except Exception as cred_err:
             logger.error("[CREDITS] failed to decrement: %s", cred_err)
 
@@ -786,7 +787,7 @@ def is_relevant_result(result: dict, query: str) -> bool:
     
     # אם לא מבקשים וידאו אבל התוצאה היא וידאו - דחה
     if not video_request and any(pattern in url for pattern in irrelevant_patterns[:1]):  # רק יוטיוב
-        logger.debug(f"Filtered out video result when not requested: {title[:50]}")
+                    logger.debug(f"Filtered out video result when not requested: {title[:50]}")
         return False
     
     # בדיקת התאמה בין סוג השאילתה לסוג התוכן
@@ -1265,7 +1266,7 @@ def perform_search(query: str) -> list[dict]:
             # דירוג התוצאות לפי רלוונטיות
             ranked_results = rank_results_by_relevance(results, query)
             
-            logger.info(f"Search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+            logger.info(f"Search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}')")
             return ranked_results
             
         except json.JSONDecodeError:
@@ -1305,7 +1306,7 @@ def perform_search(query: str) -> list[dict]:
             # דירוג התוצאות לפי רלוונטיות גם בfallback
             ranked_results = rank_results_by_relevance(results, query)
             
-            logger.info(f"Fallback search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+            logger.info(f"Fallback search completed: {len(ranked_results)} relevant results found for query: '{query[:50]}{'...' if len(query) > 50 else ''}')")
             return ranked_results
 
     except Exception as e:
@@ -2126,7 +2127,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
     topic_id = job_data['topic_id']
     user_id = job_data['user_id']
     
-    logger.info(f"Starting one-time check for topic ID: {topic_id}")
+    # Starting one-time check (reduced logging noise)
     
     # קבלת פרטי הנושא
     topic = db.get_topic_by_id(topic_id)
@@ -2135,7 +2136,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        logger.info(f"One-time checking topic: {topic['topic']} (ID: {topic_id})")
+        # One-time checking topic (reduced logging noise)
         
         # בדיקת מגבלת שימוש לפני הבדיקה
         usage_info = db.get_user_usage(user_id)
@@ -2189,7 +2190,9 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
             if valid_results:
                 # שימוש בפונקציה המאוחדת לשליחת הודעה עברית אחת
                 await send_results_hebrew_only(context.bot, user_id, topic['topic'], valid_results)
-                logger.info(f"One-time check completed successfully for topic {topic_id}, found {len(valid_results)} valid results out of {len(results)} total results")
+                # Only log when results are actually sent
+            if valid_results:
+                logger.info(f"One-time check: sent {len(valid_results)} results for topic {topic_id}")
             else:
                 # אם לא היו תוצאות תקינות, שלח הודעה על כך
                 await context.bot.send_message(
@@ -2199,7 +2202,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                          f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                     **_LP_KW
                 )
-                logger.info(f"One-time check completed for topic {topic_id}, no valid results found (had {len(results)} invalid results)")
+                # Removed noisy "no valid results" logging
         else:
             # אם לא נמצאו תוצאות כלל
             await context.bot.send_message(
@@ -2209,7 +2212,7 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
                      f"🔄 הבדיקות הקבועות יתחילו בהתאם לתדירות שנבחרה",
                 **_LP_KW
             )
-            logger.info(f"One-time check completed for topic {topic_id}, no new results found")
+            # Removed noisy "no new results" logging
         
         # עדכון זמן הבדיקה האחרונה תמיד
         db.update_topic_checked(topic_id)
@@ -2240,14 +2243,15 @@ async def check_single_topic_job(context: ContextTypes.DEFAULT_TYPE):
 # פונקציית המעקב האוטומטית
 async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
     """בדיקת נושאים אוטומטית"""
-    logger.info("Starting automatic topics check...")
-    
+    # Starting automatic topics check (reduced logging)
     topics = db.get_active_topics_for_check()
-    logger.info(f"Found {len(topics)} topics to check")
+    # Only log if there are topics to check
+    if topics:
+        logger.info(f"Checking {len(topics)} active topics")
     
     for topic in topics:
         try:
-            logger.info(f"Checking topic: {topic['topic']} (ID: {topic['id']})")
+            # Reduced per-topic logging noise
             
             # בדיקת מגבלת שימוש לפני הבדיקה
             usage_info = db.get_user_usage(topic['user_id'])
@@ -2281,7 +2285,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
             results = run_topic_search(topic_obj)
             
             if results:
-                logger.info("Found %d results for topic %d", len(results), topic['id'])
+                # Only log when there are actually new results to send
                 
                 # שמירת תוצאות חדשות ושליחה - Hebrew consolidated message
                 new_results = []
@@ -2301,10 +2305,7 @@ async def check_topics_job(context: ContextTypes.DEFAULT_TYPE):
                 if new_results:
                     await send_results_hebrew_only(context.bot, topic['user_id'], topic['topic'], new_results)
                     logger.info("Sent %d new results for topic %d", len(new_results), topic['id'])
-                else:
-                    logger.info("No new results for topic %d (all were duplicates)", topic['id'])
-            else:
-                logger.info("No results found for topic %d", topic['id'])
+                # Removed noisy "no results" logging
             
             # בדיקה אם זו הבדיקה האחרונה לנושא עם מגבלת בדיקות
             checks_remaining = topic.get('checks_remaining')
